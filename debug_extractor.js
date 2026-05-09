@@ -1,16 +1,34 @@
 import { M3U8Extractor } from './src/M3U8Extractor.js';
 
+const TARGETS = [
+  'https://cauthutv.cc/',
+  'https://sv2.hoiquan3.live/trang-chu',
+];
+
 (async () => {
   const ext = new M3U8Extractor({ headless: false });
   await ext.init();
-  const matches = await ext.listMatches('https://khandaia3.me');
-  console.log(`Found ${matches.length} matches initially.`);
-  
-  const filtered = matches.filter(m => {
-    const normalized = m.title.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    return !normalized.includes('sap dau') && !normalized.includes('sap dien ra');
-  });
-  console.log(`Found ${filtered.length} matches after filtering.`);
-  
+
+  for (const url of TARGETS) {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`Testing: ${url}`);
+    console.log('='.repeat(60));
+
+    try {
+      // Step 1: List matches
+      const matches = await ext.listMatches(url);
+      console.log(`Found ${matches.length} matches:`);
+      for (const m of matches.slice(0, 15)) {
+        console.log(`  [${m.title?.substring(0, 80)}] → ${m.href}`);
+      }
+
+      if (matches.length === 0) {
+        console.log('⚠️  No matches found — selectors likely incompatible with this site.');
+      }
+    } catch (err) {
+      console.error(`❌ Error: ${err.message}`);
+    }
+  }
+
   await ext.close();
 })();

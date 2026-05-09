@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { M3U8Extractor } from './src/M3U8Extractor.js';
-import { resolveCrawlConfig } from './src/loadServerLinkConfig.js';
+import { resolveCrawlConfig, resolveAllCrawlConfigs } from './src/loadServerLinkConfig.js';
 import fs from 'fs/promises';
 import cron from 'node-cron';
 import express from 'express';
@@ -76,18 +76,19 @@ async function startServe(args) {
     limitArg: limitArg ?? process.env.LIST_LIMIT,
   };
 
-  const firstConfig = await resolveCrawlConfig(cliDefaults);
-  if (!firstConfig) {
+  const allConfigs = await resolveAllCrawlConfigs(cliDefaults);
+  if (allConfigs.length === 0) {
     console.error(
-      'Missing target URL: add server_link/khandai.json with "targetUrl", or set TARGET_URL / pass URL on CLI.',
+      'Missing target URL: add JSON files to server_link/ with "targetUrl", or set TARGET_URL / pass URL on CLI.',
     );
     printUsage();
     process.exit(1);
   }
 
-  console.log(
-    `[server_link] Crawl config: ${firstConfig.subCommand} ${firstConfig.targetUrl} (limit: ${firstConfig.limitArg || 'default'}) — file: ${firstConfig.configPath}`,
-  );
+  console.log(`[server_link] Found ${allConfigs.length} crawl source(s):`);
+  for (const cfg of allConfigs) {
+    console.log(`  - ${cfg.configPath}: ${cfg.subCommand} ${cfg.targetUrl} (limit: ${cfg.limitArg || 'default'})`);
+  }
 
   const app = express();
   app.use(cors());
@@ -100,31 +101,32 @@ async function startServe(args) {
 
   app.get('/playlist.m3u', async (req, res) => {
     try {
-      let content = '#EXTM3U\n';
-      try {
-        const vietanh = await fs.readFile('vietanh.m3u', 'utf-8');
-        content += vietanh.replace(/#EXTM3U/i, '').trim() + '\n';
-      } catch (err) {}
-
-      try {
-        const playlist = await fs.readFile('playlist.m3u', 'utf-8');
-        content += playlist.replace(/#EXTM3U/i, '').trim() + '\n';
-      } catch (err) {}
-
+      const content = await buildMergedPlaylistM3U();
       res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch (err) {
-      res.status(404).send('#EXTM3U\n# Error');
+      res.status(404).type('text/plain').send('#EXTM3U\n# Error');
     }
   });
 
+  // Same body as /playlist.m3u (plain M3U text), like raw GitHub .m3u — not JSON
   app.get('/api/playlist', async (req, res) => {
     try {
-      const content = await fs.readFile('playlist.json', 'utf-8');
-      res.setHeader('Content-Type', 'application/json');
+      const content = await buildMergedPlaylistM3U();
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.send(content);
     } catch (err) {
-      res.status(404).json({ error: 'No data generated yet. Please wait for the first cron job run.' });
+      res.status(404).type('text/plain').send('#EXTM3U\n');
+    }
+  });
+
+  app.get('/api/playlist.json', async (req, res) => {
+    try {
+      const content = await fs.readFile('playlist.json', 'utf-8');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.send(content);
+    } catch (err) {
+      res.status(404).json({ error: 'No data generated yet. Please wait for the first crawl run.' });
     }
   });
 
@@ -132,21 +134,52 @@ async function startServe(args) {
   app.listen(port, host, () => {
     console.log(`Server is running on http://${host}:${port}`);
     console.log(`- M3U Playlist: http://${host}:${port}/playlist.m3u`);
-    console.log(`- JSON API:     http://${host}:${port}/api/playlist`);
+    console.log(`- M3U (API):    http://${host}:${port}/api/playlist`);
+    console.log(`- JSON (raw):   http://${host}:${port}/api/playlist.json`);
     console.log(`- Health:       http://${host}:${port}/health`);
   });
 
-  async function runScheduledCrawl(label) {
-    const cfg = await resolveCrawlConfig(cliDefaults);
-    if (!cfg) {
-      const msg = `[${new Date().toISOString()}] ${label}: no crawl config (check server_link JSON / TARGET_URL).`;
-      console.error(msg);
-      throw new Error(msg);
+  async function runAllSources(label) {
+    const configs = await resolveAllCrawlConfigs(cliDefaults);
+    if (configs.length === 0) {
+      console.error(`[${new Date().toISOString()}] ${label}: no crawl configs found.`);
+      return;
     }
-    console.log(
-      `[${new Date().toISOString()}] ${label}: ${cfg.subCommand} ${cfg.targetUrl} limit=${cfg.limitArg || 'default'}`,
-    );
-    await runOnce(cfg.subCommand, cfg.targetUrl, cfg.limitArg, 'playlist');
+
+    const extractor = new M3U8Extractor();
+    await extractor.init();
+
+    let allResults = [];
+    let allPlaylistLines = [];
+
+    try {
+      for (const cfg of configs) {
+        const ts = new Date().toISOString();
+        console.log(`[${ts}] ${label}: crawling ${cfg.targetUrl} (${cfg.configPath})...`);
+        try {
+          const limit = parseLimit(cfg.limitArg, 100);
+          const results = await extractor.extractAll(cfg.targetUrl, { limit });
+          const playlist = buildIptvPlaylist(results, { sourceUrl: cfg.targetUrl });
+
+          allResults.push(...results);
+          // Strip #EXTM3U header from individual playlists before merging
+          const stripped = playlist.replace(/^#EXTM3U\s*/i, '').trim();
+          if (stripped) allPlaylistLines.push(stripped);
+
+          console.log(`[${new Date().toISOString()}] ${label}: got ${results.length} matches from ${cfg.targetUrl}`);
+        } catch (err) {
+          console.error(`[${new Date().toISOString()}] ${label}: failed for ${cfg.targetUrl}: ${err.message}`);
+        }
+      }
+    } finally {
+      await extractor.close();
+    }
+
+    // Write merged results
+    const mergedPlaylist = '#EXTM3U\n' + allPlaylistLines.join('\n');
+    await fs.writeFile('playlist.m3u', mergedPlaylist, 'utf-8');
+    await fs.writeFile('playlist.json', JSON.stringify(allResults, null, 2), 'utf-8');
+    console.log(`[${new Date().toISOString()}] ${label}: saved ${allResults.length} total matches to playlist.m3u / playlist.json`);
   }
 
   console.log(`Starting background cron job with schedule: "${cronExp}"`);
@@ -158,8 +191,8 @@ async function startServe(args) {
     jobRunning = true;
     console.log(`[${new Date().toISOString()}] Running scheduled job...`);
     try {
-      await runScheduledCrawl('Scheduled job');
-      console.log(`[${new Date().toISOString()}] Job finished successfully. Saved to playlist.m3u and playlist.json`);
+      await runAllSources('Scheduled job');
+      console.log(`[${new Date().toISOString()}] Job finished successfully.`);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] Scheduled job failed.`);
     } finally {
@@ -169,7 +202,7 @@ async function startServe(args) {
 
   console.log(`[${new Date().toISOString()}] Running initial crawl on startup...`);
   jobRunning = true;
-  runScheduledCrawl('Initial crawl')
+  runAllSources('Initial crawl')
     .then(() => console.log(`[${new Date().toISOString()}] Initial crawl finished successfully.`))
     .catch(() => console.error(`[${new Date().toISOString()}] Initial crawl failed.`))
     .finally(() => {
@@ -257,6 +290,21 @@ main().catch((err) => {
   console.error(err);
   process.exit(1);
 });
+
+async function buildMergedPlaylistM3U() {
+  let content = '#EXTM3U\n';
+  try {
+    const vietanh = await fs.readFile('vietanh.m3u', 'utf-8');
+    content += vietanh.replace(/#EXTM3U/i, '').trim() + '\n';
+  } catch (err) {}
+
+  try {
+    const playlist = await fs.readFile('playlist.m3u', 'utf-8');
+    content += playlist.replace(/#EXTM3U/i, '').trim() + '\n';
+  } catch (err) {}
+
+  return content;
+}
 
 function buildIptvPlaylist(results, { sourceUrl } = {}) {
   const lines = ['#EXTM3U'];
