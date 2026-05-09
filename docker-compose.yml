@@ -11,11 +11,16 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       CRON_SCHEDULE: "*/30 * * * *"
+      SERVER_LINK_CONFIG: "server_link/khandai.json"
+      # Fallbacks if server_link file is missing (e.g. empty bind mount)
       SERVE_SUBCOMMAND: list
       TARGET_URL: "https://khandaia3.me"
       # LIST_LIMIT: "100"
       HEADLESS: "false"
       TIMEOUT_MS: "45000"
+    volumes:
+      # Sửa targetUrl / limit trong ./server_link/khandai.json — không cần restart container
+      - ./server_link:/app/server_link
     healthcheck:
       test:
         [
@@ -28,6 +33,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
-    # Giữ playlist giữa restart (tùy chọn — bỏ comment nếu cần)
-    # volumes:
-    #   - ./data:/app

@@ -21,6 +21,7 @@ EXPOSE 3000
 ENV HOST=0.0.0.0
 ENV PORT=3000
 ENV CRON_SCHEDULE="*/30 * * * *"
+ENV SERVER_LINK_CONFIG=server_link/khandai.json
 ENV SERVE_SUBCOMMAND=list
 ENV TARGET_URL=https://khandaia3.me
 # Optional: set LIST_LIMIT=50 to cap listing scrape (omit for default 100)

@@ -1,18 +1,11 @@
 #!/usr/bin/env node
 
 import { M3U8Extractor } from './src/M3U8Extractor.js';
+import { resolveCrawlConfig } from './src/loadServerLinkConfig.js';
 import fs from 'fs/promises';
 import cron from 'node-cron';
 import express from 'express';
 import cors from 'cors';
-
-const args = process.argv.slice(2);
-const commandOrUrl = args[0];
-
-if (!commandOrUrl) {
-  printUsage();
-  process.exit(1);
-}
 
 async function runOnce(subCommand, targetUrl, limitArg, outputPrefix) {
   const extractor = new M3U8Extractor();
@@ -60,14 +53,14 @@ async function runOnce(subCommand, targetUrl, limitArg, outputPrefix) {
   }
 }
 
-if (commandOrUrl === 'serve') {
+async function startServe(args) {
   const port = parseInt(args[1], 10) || 3000;
   const cronExp = args[2];
   const subCommand = args[3];
   const targetUrl = args[4];
   const limitArg = args[5];
 
-  if (!cronExp || !subCommand || !targetUrl) {
+  if (!cronExp) {
     printUsage();
     process.exit(1);
   }
@@ -76,6 +69,25 @@ if (commandOrUrl === 'serve') {
     console.error('Invalid cron expression:', cronExp);
     process.exit(1);
   }
+
+  const cliDefaults = {
+    subCommand: subCommand ?? process.env.SERVE_SUBCOMMAND,
+    targetUrl: targetUrl ?? process.env.TARGET_URL,
+    limitArg: limitArg ?? process.env.LIST_LIMIT,
+  };
+
+  const firstConfig = await resolveCrawlConfig(cliDefaults);
+  if (!firstConfig) {
+    console.error(
+      'Missing target URL: add server_link/khandai.json with "targetUrl", or set TARGET_URL / pass URL on CLI.',
+    );
+    printUsage();
+    process.exit(1);
+  }
+
+  console.log(
+    `[server_link] Crawl config: ${firstConfig.subCommand} ${firstConfig.targetUrl} (limit: ${firstConfig.limitArg || 'default'}) — file: ${firstConfig.configPath}`,
+  );
 
   const app = express();
   app.use(cors());
@@ -93,12 +105,12 @@ if (commandOrUrl === 'serve') {
         const vietanh = await fs.readFile('vietanh.m3u', 'utf-8');
         content += vietanh.replace(/#EXTM3U/i, '').trim() + '\n';
       } catch (err) {}
-      
+
       try {
         const playlist = await fs.readFile('playlist.m3u', 'utf-8');
         content += playlist.replace(/#EXTM3U/i, '').trim() + '\n';
       } catch (err) {}
-      
+
       res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch (err) {
@@ -124,6 +136,19 @@ if (commandOrUrl === 'serve') {
     console.log(`- Health:       http://${host}:${port}/health`);
   });
 
+  async function runScheduledCrawl(label) {
+    const cfg = await resolveCrawlConfig(cliDefaults);
+    if (!cfg) {
+      const msg = `[${new Date().toISOString()}] ${label}: no crawl config (check server_link JSON / TARGET_URL).`;
+      console.error(msg);
+      throw new Error(msg);
+    }
+    console.log(
+      `[${new Date().toISOString()}] ${label}: ${cfg.subCommand} ${cfg.targetUrl} limit=${cfg.limitArg || 'default'}`,
+    );
+    await runOnce(cfg.subCommand, cfg.targetUrl, cfg.limitArg, 'playlist');
+  }
+
   console.log(`Starting background cron job with schedule: "${cronExp}"`);
   cron.schedule(cronExp, async () => {
     if (jobRunning) {
@@ -133,7 +158,7 @@ if (commandOrUrl === 'serve') {
     jobRunning = true;
     console.log(`[${new Date().toISOString()}] Running scheduled job...`);
     try {
-      await runOnce(subCommand, targetUrl, limitArg, 'playlist');
+      await runScheduledCrawl('Scheduled job');
       console.log(`[${new Date().toISOString()}] Job finished successfully. Saved to playlist.m3u and playlist.json`);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] Scheduled job failed.`);
@@ -144,20 +169,21 @@ if (commandOrUrl === 'serve') {
 
   console.log(`[${new Date().toISOString()}] Running initial crawl on startup...`);
   jobRunning = true;
-  runOnce(subCommand, targetUrl, limitArg, 'playlist')
+  runScheduledCrawl('Initial crawl')
     .then(() => console.log(`[${new Date().toISOString()}] Initial crawl finished successfully.`))
     .catch(() => console.error(`[${new Date().toISOString()}] Initial crawl failed.`))
     .finally(() => {
       jobRunning = false;
     });
+}
 
-} else if (commandOrUrl === 'cron') {
+async function startCronOnly(args) {
   const cronExp = args[1];
   const subCommand = args[2];
   const targetUrl = args[3];
   const limitArg = args[4];
 
-  if (!cronExp || !subCommand || !targetUrl) {
+  if (!cronExp) {
     printUsage();
     process.exit(1);
   }
@@ -167,23 +193,70 @@ if (commandOrUrl === 'serve') {
     process.exit(1);
   }
 
+  const cliDefaults = {
+    subCommand: subCommand ?? process.env.SERVE_SUBCOMMAND,
+    targetUrl: targetUrl ?? process.env.TARGET_URL,
+    limitArg: limitArg ?? process.env.LIST_LIMIT,
+  };
+
+  const firstConfig = await resolveCrawlConfig(cliDefaults);
+  if (!firstConfig) {
+    console.error(
+      'Missing target URL: add server_link/khandai.json with "targetUrl", or set TARGET_URL / pass URL on CLI.',
+    );
+    printUsage();
+    process.exit(1);
+  }
+
   console.log(`Starting cron job with schedule: "${cronExp}"`);
-  console.log(`Command: ${subCommand} ${targetUrl} ${limitArg || ''}`);
+  console.log(
+    `[server_link] First resolve: ${firstConfig.subCommand} ${firstConfig.targetUrl} (${firstConfig.configPath})`,
+  );
 
   cron.schedule(cronExp, async () => {
     console.log(`[${new Date().toISOString()}] Running scheduled job...`);
     try {
-      await runOnce(subCommand, targetUrl, limitArg, 'playlist');
+      const cfg = await resolveCrawlConfig(cliDefaults);
+      if (!cfg) {
+        console.error(`[${new Date().toISOString()}] No crawl config. Skipping.`);
+        return;
+      }
+      await runOnce(cfg.subCommand, cfg.targetUrl, cfg.limitArg, 'playlist');
       console.log(`[${new Date().toISOString()}] Job finished successfully. Saved to playlist.m3u and playlist.json`);
     } catch (error) {
       console.error(`[${new Date().toISOString()}] Scheduled job failed.`);
     }
   });
-} else {
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const commandOrUrl = args[0];
+
+  if (!commandOrUrl) {
+    printUsage();
+    process.exit(1);
+  }
+
+  if (commandOrUrl === 'serve') {
+    await startServe(args);
+    return;
+  }
+
+  if (commandOrUrl === 'cron') {
+    await startCronOnly(args);
+    return;
+  }
+
   const targetUrl = args[1];
   const limitArg = args[2];
-  runOnce(commandOrUrl, targetUrl, limitArg).catch(() => {});
+  await runOnce(commandOrUrl, targetUrl, limitArg).catch(() => {});
 }
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 
 function buildIptvPlaylist(results, { sourceUrl } = {}) {
   const lines = ['#EXTM3U'];
@@ -200,8 +273,6 @@ function buildIptvPlaylist(results, { sourceUrl } = {}) {
       const groupTitle = sanitizeForQuotedAttr(domainGroupName(stream.pageUrl || sourceUrl));
       const displayTitle = sanitizeForExtInf(channelName);
 
-      // Align with common public IPTV M3U (e.g. bongda.m3u): group-title + title after comma,
-      // EXTVLCOPT user-agent then referrer only — no #KODIPROP / tvg-name (many IPTV apps reject those).
       lines.push(`#EXTINF:-1 group-title="${groupTitle}",${displayTitle}`);
 
       if (headers['User-Agent']) {
@@ -259,10 +330,11 @@ function printUsage() {
   console.error('  node index.js list <listingUrl> [limit]');
   console.error('  node index.js match <matchUrl>');
   console.error('  node index.js <matchUrl>');
-  console.error('  node index.js cron "<cronExpression>" list <listingUrl> [limit]');
-  console.error('  node index.js cron "<cronExpression>" match <matchUrl>');
-  console.error('  node index.js serve <port> "<cronExpression>" list <listingUrl> [limit]');
-  console.error('  node index.js serve <port> "<cronExpression>" match <matchUrl>');
+  console.error('  node index.js cron "<cronExpression>" [list|match] [targetUrl] [limit]');
+  console.error('  node index.js serve <port> "<cronExpression>" [list|match] [targetUrl] [limit]');
+  console.error('');
+  console.error('  When serve/cron: crawl target is read from server_link/khandai.json on every run');
+  console.error('  (override with SERVER_LINK_CONFIG). CLI args / TARGET_URL env are fallbacks if JSON missing.');
 }
 
 function toHeaderCase(name) {
