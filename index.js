@@ -99,7 +99,7 @@ if (commandOrUrl === 'serve') {
         content += playlist.replace(/#EXTM3U/i, '').trim() + '\n';
       } catch (err) {}
       
-      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch (err) {
       res.status(404).send('#EXTM3U\n# Error');
@@ -197,21 +197,19 @@ function buildIptvPlaylist(results, { sourceUrl } = {}) {
       const headers = pickPlaybackHeaders(stream.headers);
       const serverLabel = sanitizeForExtInf(stream.server || `server-${index + 1}`);
       const channelName = `${baseTitle} | ${serverLabel}`;
-      const groupTitle = sanitizeForExtInf(domainGroupName(stream.pageUrl || sourceUrl));
-      const kodiHeaders = buildKodiHeaderOption(headers);
+      const groupTitle = sanitizeForQuotedAttr(domainGroupName(stream.pageUrl || sourceUrl));
+      const displayTitle = sanitizeForExtInf(channelName);
 
-      lines.push(`#EXTINF:-1 tvg-name="${channelName}" group-title="${groupTitle}",${channelName}`);
-
-      if (headers.Referer) {
-        lines.push(`#EXTVLCOPT:http-referrer=${headers.Referer}`);
-      }
+      // Align with common public IPTV M3U (e.g. bongda.m3u): group-title + title after comma,
+      // EXTVLCOPT user-agent then referrer only — no #KODIPROP / tvg-name (many IPTV apps reject those).
+      lines.push(`#EXTINF:-1 group-title="${groupTitle}",${displayTitle}`);
 
       if (headers['User-Agent']) {
         lines.push(`#EXTVLCOPT:http-user-agent=${headers['User-Agent']}`);
       }
 
-      if (kodiHeaders) {
-        lines.push(`#KODIPROP:inputstream.adaptive.stream_headers=${kodiHeaders}`);
+      if (headers.Referer) {
+        lines.push(`#EXTVLCOPT:http-referrer=${headers.Referer}`);
       }
 
       lines.push(stream.url);
@@ -220,7 +218,7 @@ function buildIptvPlaylist(results, { sourceUrl } = {}) {
   }
 
   if (channelCount === 0) {
-    lines.push('# No stream found');
+    return '#EXTM3U\n';
   }
 
   return lines.join('\n');
@@ -237,18 +235,6 @@ function pickPlaybackHeaders(headers) {
   }
 
   return normalized;
-}
-
-function buildKodiHeaderOption(headers) {
-  const headerList = Object.entries(headers).filter(([, value]) => Boolean(value));
-
-  if (headerList.length === 0) {
-    return '';
-  }
-
-  return headerList
-    .map(([name, value]) => `${encodeURIComponent(name)}=${encodeURIComponent(value)}`)
-    .join('&');
 }
 
 function domainGroupName(url) {
@@ -287,5 +273,18 @@ function toHeaderCase(name) {
 }
 
 function sanitizeForExtInf(value) {
-  return String(value).replaceAll('\r', ' ').replaceAll('\n', ' ').replaceAll(',', ' -').trim();
+  return String(value)
+    .replaceAll('\r', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('"', "'")
+    .replaceAll(',', ' -')
+    .trim();
+}
+
+function sanitizeForQuotedAttr(value) {
+  return String(value)
+    .replaceAll('\r', ' ')
+    .replaceAll('\n', ' ')
+    .replaceAll('"', "'")
+    .trim();
 }
