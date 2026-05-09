@@ -1,0 +1,7 @@
+node_modules/
+.git/
+.env
+playlist.m3u
+playlist.json
+check_links.js
+debug_extractor.js

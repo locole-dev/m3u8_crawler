@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    container_name: m3u8_scraper
+    ports:
+      - "${PORT:-3000}:3000"
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      CRON_SCHEDULE: "*/30 * * * *"
+      SERVE_SUBCOMMAND: list
+      TARGET_URL: "https://khandaia3.me"
+      # LIST_LIMIT: "100"
+      HEADLESS: "false"
+      TIMEOUT_MS: "45000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    # Giữ playlist giữa restart (tùy chọn — bỏ comment nếu cần)
+    # volumes:
+    #   - ./data:/app
