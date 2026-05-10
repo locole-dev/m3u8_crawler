@@ -11,15 +11,14 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       CRON_SCHEDULE: "*/30 * * * *"
-      SERVER_LINK_CONFIG: "server_link/khandai.json"
-      # Fallbacks if server_link file is missing (e.g. empty bind mount)
+      # Fallback khi thư mục server_link trống — mặc định Cầu Thủ TV
       SERVE_SUBCOMMAND: list
-      TARGET_URL: "https://khandaia3.me"
+      TARGET_URL: "https://cauthutv.cc/"
       # LIST_LIMIT: "100"
       HEADLESS: "false"
       TIMEOUT_MS: "45000"
     volumes:
-      # Sửa targetUrl / limit trong ./server_link/khandai.json — không cần restart container
+      # Mọi file server_link/*.json là một nguồn crawl — sửa không cần restart
       - ./server_link:/app/server_link
     healthcheck:
       test:

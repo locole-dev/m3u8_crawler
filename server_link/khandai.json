@@ -1,5 +1,6 @@
 {
   "subCommand": "list",
   "targetUrl": "https://khandaia3.me",
-  "limit": 100
+  "limit": 100,
+  "groupName": "Khán Đài"
 }

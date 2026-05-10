@@ -20,9 +20,26 @@ function parseConfigFile(raw, filePath) {
       limitArg = String(parsed.limit);
     }
 
+    const groupNameRaw = parsed.groupName;
+    const groupName = groupNameRaw !== undefined && groupNameRaw !== null && String(groupNameRaw).trim() !== ''
+        ? String(groupNameRaw).trim()
+        : undefined;
+
+    const itemSelectorRaw = parsed.itemSelector ?? parsed.listingItemSelector;
+    const itemSelector =
+      itemSelectorRaw !== undefined && itemSelectorRaw !== null && String(itemSelectorRaw).trim() !== ''
+        ? String(itemSelectorRaw).trim()
+        : undefined;
+
+    const serverTabsRaw = parsed.serverTabsSelector;
+    const serverTabsSelector =
+      serverTabsRaw !== undefined && serverTabsRaw !== null && String(serverTabsRaw).trim() !== ''
+        ? String(serverTabsRaw).trim()
+        : undefined;
+
     if (!targetUrl) return null;
 
-    return { subCommand, targetUrl, limitArg, configPath: filePath };
+    return { subCommand, targetUrl, limitArg, itemSelector, serverTabsSelector, groupName, configPath: filePath };
   } catch {
     return null;
   }
@@ -74,6 +91,8 @@ export async function resolveAllCrawlConfigs(cliDefaults = {}) {
         subCommand,
         targetUrl,
         limitArg: cliDefaults.limitArg,
+        itemSelector: undefined,
+        serverTabsSelector: undefined,
         configPath: '(cli/env fallback)',
       });
     }

@@ -7,6 +7,7 @@ import {
   PLAY_SELECTORS,
   SERVER_SELECTORS,
 } from './selectors.js';
+import { resolveSiteProfile } from './sites/registry.js';
 
 const { chromium } = playwrightExtra;
 const M3U8_URL_RE = /\.m3u8(\?|$)/i;
@@ -65,26 +66,55 @@ export class M3U8Extractor {
       await this.init();
     }
 
+    const profile = resolveSiteProfile(listingUrl);
+    const primarySelector = itemSelector ?? profile.listingItemSelector ?? null;
+    const selectors = primarySelector ? [primarySelector] : LISTING_ITEM_SELECTORS;
+    const networkCap = profile.networkIdleCapMs ?? 8000;
+    const scrollPasses = profile.scrollPasses ?? 1;
+
     const page = await this.context.newPage();
 
     try {
       await this.#safeGoto(page, listingUrl);
-      const selectors = itemSelector ? [itemSelector] : LISTING_ITEM_SELECTORS;
 
-      let matches = await this.#extractFirstMatchingLinks(page, selectors, listingUrl);
+      if (typeof profile.prepareListingPage === 'function') {
+        await profile.prepareListingPage(page, { timeout: this.config.timeout });
+      } else if (primarySelector) {
+        await page
+          .waitForSelector(primarySelector, {
+            state: 'attached',
+            timeout: Math.min(25000, this.config.timeout),
+          })
+          .catch(() => {});
+        await sleep(800);
+      }
 
+      const tryExtract = async () => this.#extractFirstMatchingLinks(page, selectors, listingUrl);
+
+      let matches = await tryExtract();
       if (matches.length > 0) {
         return matches;
       }
 
       await this.#actHuman(page);
-      await this.#waitForQuiet(page, Math.min(5000, this.config.timeout));
-      matches = await this.#extractFirstMatchingLinks(page, selectors, listingUrl);
-
-      if (matches.length > 0 || itemSelector) {
+      await this.#waitForQuiet(page, Math.min(networkCap, this.config.timeout));
+      matches = await tryExtract();
+      if (matches.length > 0) {
         return matches;
       }
 
+      for (let i = 0; i < scrollPasses; i += 1) {
+        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+        await sleep(i === 0 ? 2000 : 1200);
+        matches = await tryExtract();
+        if (matches.length > 0) {
+          return matches;
+        }
+      }
+
+      if (profile.skipHtmlFetchFallback) {
+        return [];
+      }
       return this.#fetchListingLinks(listingUrl);
     } finally {
       await page.close().catch(() => {});
@@ -119,21 +149,29 @@ export class M3U8Extractor {
   }
 
   async extractAll(listingUrl, { limit = 100, itemSelector, serverTabsSelector } = {}) {
+    const profile = resolveSiteProfile(listingUrl);
     let matches = await this.listMatches(listingUrl, { itemSelector });
-    
-    // Lọc bỏ các trận "Sắp đấu" (chưa có link m3u8) để đỡ tốn thời gian chờ timeout
+
+    if (typeof profile.filterListingMatch === 'function') {
+      matches = matches.filter((m) => profile.filterListingMatch(m));
+    }
+
+    // Lọc bỏ các trận "Sắp đấu" và "Kết thúc" để đỡ tốn thời gian chờ timeout
     matches = matches.filter((m) => {
       const raw = m.title ?? '';
       const norm = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      return !norm.includes('sap dau') && !norm.includes('sap dien ra');
+      const isUpcoming = norm.includes('sap dau') || norm.includes('sap dien ra');
+      const isFinished = norm.includes('ket thuc') || norm.includes('da dien ra');
+      return !isUpcoming && !isFinished;
     });
 
     const selected = matches.slice(0, limit);
     const results = [];
+    const tabs = serverTabsSelector ?? profile.serverTabsSelector ?? undefined;
 
     for (const [index, match] of selected.entries()) {
       const result = await this.extractFromMatch(match.href, {
-        serverTabsSelector,
+        serverTabsSelector: tabs,
         title: match.title,
       });
       results.push(result);
@@ -497,7 +535,7 @@ export class M3U8Extractor {
 
       const label = await item
         .evaluate((element) => {
-          const text = element.textContent?.replace(/\s+/g, ' ').trim();
+          const text = (element.innerText || element.textContent)?.replace(/\s+/g, ' ').trim();
           return (
             text ||
             element.getAttribute('aria-label') ||
@@ -545,8 +583,8 @@ export class M3U8Extractor {
             const title =
               anchor.getAttribute('aria-label') ||
               anchor.getAttribute('title') ||
-              anchor.textContent?.replace(/\s+/g, ' ').trim() ||
-              element.textContent?.replace(/\s+/g, ' ').trim() ||
+              (anchor.innerText || anchor.textContent)?.replace(/\s+/g, ' ').trim() ||
+              (element.innerText || element.textContent)?.replace(/\s+/g, ' ').trim() ||
               href;
 
             return { title, href };

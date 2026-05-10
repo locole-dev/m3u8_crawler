@@ -87,7 +87,13 @@ async function startServe(args) {
 
   console.log(`[server_link] Found ${allConfigs.length} crawl source(s):`);
   for (const cfg of allConfigs) {
-    console.log(`  - ${cfg.configPath}: ${cfg.subCommand} ${cfg.targetUrl} (limit: ${cfg.limitArg || 'default'})`);
+    const extra =
+      [cfg.itemSelector ? `item=${cfg.itemSelector}` : null, cfg.serverTabsSelector ? `tabs=${cfg.serverTabsSelector}` : null]
+        .filter(Boolean)
+        .join(' ');
+    console.log(
+      `  - ${cfg.configPath}: ${cfg.subCommand} ${cfg.targetUrl} (limit: ${cfg.limitArg || 'default'})${extra ? ` [${extra}]` : ''}`,
+    );
   }
 
   const app = express();
@@ -113,7 +119,8 @@ async function startServe(args) {
   app.get('/api/playlist', async (req, res) => {
     try {
       const content = await buildMergedPlaylistM3U();
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      // Same as /playlist.m3u — some IPTV clients only treat audio/x-mpegurl as a playlist
+      res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch (err) {
       res.status(404).type('text/plain').send('#EXTM3U\n');
@@ -158,8 +165,12 @@ async function startServe(args) {
         console.log(`[${ts}] ${label}: crawling ${cfg.targetUrl} (${cfg.configPath})...`);
         try {
           const limit = parseLimit(cfg.limitArg, 100);
-          const results = await extractor.extractAll(cfg.targetUrl, { limit });
-          const playlist = buildIptvPlaylist(results, { sourceUrl: cfg.targetUrl });
+          const results = await extractor.extractAll(cfg.targetUrl, {
+            limit,
+            itemSelector: cfg.itemSelector,
+            serverTabsSelector: cfg.serverTabsSelector,
+          });
+          const playlist = buildIptvPlaylist(results, { sourceUrl: cfg.targetUrl, groupName: cfg.groupName });
 
           allResults.push(...results);
           // Strip #EXTM3U header from individual playlists before merging
@@ -306,19 +317,20 @@ async function buildMergedPlaylistM3U() {
   return content;
 }
 
-function buildIptvPlaylist(results, { sourceUrl } = {}) {
+function buildIptvPlaylist(results, { sourceUrl, groupName } = {}) {
   const lines = ['#EXTM3U'];
   let channelCount = 0;
 
   for (const result of results) {
     const streams = result?.streams ?? [];
-    const baseTitle = sanitizeForExtInf(result?.title || result?.matchUrl || 'Unknown match');
+    const rawTitle = result?.title || result?.matchUrl || 'Unknown match';
+    const baseTitle = sanitizeForExtInf(cleanMatchTitle(rawTitle));
 
     for (const [index, stream] of streams.entries()) {
       const headers = pickPlaybackHeaders(stream.headers);
       const serverLabel = sanitizeForExtInf(stream.server || `server-${index + 1}`);
       const channelName = `${baseTitle} | ${serverLabel}`;
-      const groupTitle = sanitizeForQuotedAttr(domainGroupName(stream.pageUrl || sourceUrl));
+      const groupTitle = groupName ? sanitizeForQuotedAttr(groupName) : sanitizeForQuotedAttr(domainGroupName(stream.pageUrl || sourceUrl));
       const displayTitle = sanitizeForExtInf(channelName);
 
       lines.push(`#EXTINF:-1 group-title="${groupTitle}",${displayTitle}`);
@@ -358,13 +370,15 @@ function pickPlaybackHeaders(headers) {
 
 function domainGroupName(url) {
   if (!url) {
-    return 'm3u8-scraper';
+    return 'M3U8 Scraper';
   }
 
   try {
-    return new URL(url).hostname;
+    const hostname = new URL(url).hostname.replace(/^www\./, '');
+    const name = hostname.substring(0, hostname.lastIndexOf('.')) || hostname;
+    return name.charAt(0).toUpperCase() + name.slice(1);
   } catch {
-    return 'm3u8-scraper';
+    return 'M3U8 Scraper';
   }
 }
 
@@ -382,7 +396,7 @@ function printUsage() {
   console.error('  node index.js serve <port> "<cronExpression>" [list|match] [targetUrl] [limit]');
   console.error('');
   console.error('  When serve/cron: crawl target is read from server_link/khandai.json on every run');
-  console.error('  (override with SERVER_LINK_CONFIG). CLI args / TARGET_URL env are fallbacks if JSON missing.');
+  console.error('  Use SERVER_LINK_DIR to point at config folder. CLI / TARGET_URL env are fallbacks if no JSON.');
 }
 
 function toHeaderCase(name) {
@@ -399,6 +413,24 @@ function sanitizeForExtInf(value) {
     .replaceAll('"', "'")
     .replaceAll(',', ' -')
     .trim();
+}
+
+function cleanMatchTitle(title) {
+  let cleaned = String(title || '');
+  const noise = [
+    /(?:^|\s)(?:Trực tiếp|Truc tiep|Xem trực tiếp|Xem truc tiep)(?:\s|$)/ig,
+    /(?:^|\s)(?:Live|Trực tuyến|Xem ngay)(?:\s|$)/ig,
+    /(?:^|\s)(?:Chất lượng cao|Full HD|HD|4K)(?:\s|$)/ig,
+    /(?:^|\s)(?:Bình luận tiếng Việt|BLV tiếng Việt|Tiếng Việt)(?:\s|$)/ig,
+    /\s+Xem$/i,
+    /^Xem\s+/i,
+  ];
+
+  for (const regex of noise) {
+    cleaned = cleaned.replace(regex, ' ');
+  }
+
+  return cleaned.replace(/\s+/g, ' ').trim();
 }
 
 function sanitizeForQuotedAttr(value) {

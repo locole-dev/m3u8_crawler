@@ -35,6 +35,8 @@ export const SERVER_SELECTORS = [
 ];
 
 export const LISTING_ITEM_SELECTORS = [
+  'a[href*="/truc-tiep/"]',
+  'a[href*="-vs-"]',
   '.match-hot-card-container a[href]',
   '.match-super-hot-card-container a[href]',
   '.live-match a[href]',
