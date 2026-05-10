@@ -333,14 +333,29 @@ function buildIptvPlaylist(results, { sourceUrl, groupName } = {}) {
       const groupTitle = groupName ? sanitizeForQuotedAttr(groupName) : sanitizeForQuotedAttr(domainGroupName(stream.pageUrl || sourceUrl));
       const displayTitle = sanitizeForExtInf(channelName);
 
-      lines.push(`#EXTINF:-1 group-title="${groupTitle}",${displayTitle}`);
+      lines.push(`#EXTINF:-1 tvg-name="${displayTitle}" group-title="${groupTitle}",${displayTitle}`);
+
+      if (headers.Referer) {
+        lines.push(`#EXTVLCOPT:http-referrer=${headers.Referer}`);
+      }
 
       if (headers['User-Agent']) {
         lines.push(`#EXTVLCOPT:http-user-agent=${headers['User-Agent']}`);
       }
 
+      // Build KODIPROP stream_headers for Kodi/TiviMate (ensures headers on sub-requests)
+      const kodiParts = [];
+      if (headers.Origin) {
+        kodiParts.push(`Origin=${encodeURIComponent(headers.Origin)}`);
+      }
       if (headers.Referer) {
-        lines.push(`#EXTVLCOPT:http-referrer=${headers.Referer}`);
+        kodiParts.push(`Referer=${encodeURIComponent(headers.Referer)}`);
+      }
+      if (headers['User-Agent']) {
+        kodiParts.push(`User-Agent=${encodeURIComponent(headers['User-Agent'])}`);
+      }
+      if (kodiParts.length > 0) {
+        lines.push(`#KODIPROP:inputstream.adaptive.stream_headers=${kodiParts.join('&')}`);
       }
 
       lines.push(stream.url);
@@ -363,6 +378,13 @@ function pickPlaybackHeaders(headers) {
     if (wanted.includes(name.toLowerCase()) && value) {
       normalized[toHeaderCase(name)] = value;
     }
+  }
+
+  // Auto-derive Origin from Referer if missing (many CDNs require it)
+  if (!normalized.Origin && normalized.Referer) {
+    try {
+      normalized.Origin = new URL(normalized.Referer).origin;
+    } catch {}
   }
 
   return normalized;
