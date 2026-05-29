@@ -56,9 +56,35 @@ async function runOnce(subCommand, targetUrl, limitArg, outputPrefix) {
   }
 }
 
+function resolveCronExpression(argvSlice) {
+  return resolveCronWithRest(argvSlice).cron;
+}
+
+/** Cron từ CRON_SCHEDULE hoặc argv (compose có thể tách cron thành nhiều token). */
+function resolveCronWithRest(argvSlice) {
+  const fromEnv = process.env.CRON_SCHEDULE?.trim();
+  if (fromEnv && cron.validate(fromEnv)) {
+    return { cron: fromEnv, rest: [...argvSlice] };
+  }
+
+  const joined = argvSlice.join(' ').trim();
+  if (joined && cron.validate(joined)) {
+    return { cron: joined, rest: [] };
+  }
+
+  for (let n = Math.min(5, argvSlice.length); n >= 1; n -= 1) {
+    const candidate = argvSlice.slice(0, n).join(' ');
+    if (cron.validate(candidate)) {
+      return { cron: candidate, rest: argvSlice.slice(n) };
+    }
+  }
+
+  return { cron: joined || fromEnv || '', rest: [] };
+}
+
 async function startServe(args) {
   const port = parseInt(args[1], 10) || 3000;
-  const cronExp = args[2];
+  const cronExp = resolveCronExpression(args.slice(2));
 
   if (!cronExp) {
     printUsage();
@@ -70,10 +96,11 @@ async function startServe(args) {
     process.exit(1);
   }
 
+  const { rest: serveRest } = resolveCronWithRest(args.slice(2));
   const cliDefaults = {
-    subCommand: args[3] ?? process.env.SERVE_SUBCOMMAND,
-    targetUrl: args[4] ?? process.env.TARGET_URL,
-    limitArg: args[5] ?? process.env.LIST_LIMIT,
+    subCommand: serveRest[0] ?? process.env.SERVE_SUBCOMMAND,
+    targetUrl: serveRest[1] ?? process.env.TARGET_URL,
+    limitArg: serveRest[2] ?? process.env.LIST_LIMIT,
   };
 
   const footballConfigs = await resolveFootballConfigs(cliDefaults);
@@ -159,11 +186,11 @@ async function startServe(args) {
 }
 
 async function startCronOnly(args) {
-  const cronExp = args[1];
+  const { cron: cronExp, rest } = resolveCronWithRest(args.slice(1));
   const cliDefaults = {
-    subCommand: args[2] ?? process.env.SERVE_SUBCOMMAND,
-    targetUrl: args[3] ?? process.env.TARGET_URL,
-    limitArg: args[4] ?? process.env.LIST_LIMIT,
+    subCommand: rest[0] ?? process.env.SERVE_SUBCOMMAND,
+    targetUrl: rest[1] ?? process.env.TARGET_URL,
+    limitArg: rest[2] ?? process.env.LIST_LIMIT,
   };
 
   if (!cronExp || !cron.validate(cronExp)) {
@@ -181,6 +208,10 @@ async function startCronOnly(args) {
 async function main() {
   const args = process.argv.slice(2);
   const commandOrUrl = args[0];
+
+  console.log(
+    `[bong-da] process start pid=${process.pid} headless=${process.env.HEADLESS ?? 'default'}`,
+  );
 
   if (!commandOrUrl) {
     printUsage();
@@ -222,7 +253,7 @@ async function buildMergedPlaylistM3U() {
 
 function printUsage() {
   console.error('Bóng đá (tách khỏi phim):');
-  console.error('  node index.js serve <port> "<cron>"');
+  console.error('  node index.js serve <port> ["<cron>"]  # hoặc CRON_SCHEDULE env');
   console.error('  node index.js list|match <url> [limit]');
   console.error('  Config: server_link/football/*.json');
   console.error('  Phim:   node film-index.js serve | crawl | match <url>');

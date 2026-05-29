@@ -127,6 +127,10 @@ async function main() {
   const cmd = args[0];
   const force = args.includes('--force');
 
+  console.log(
+    `[phim] process start pid=${process.pid} headless=${process.env.FILM_HEADLESS ?? process.env.HEADLESS ?? 'default'}`,
+  );
+
   if (!cmd) {
     printUsage();
     process.exit(1);
