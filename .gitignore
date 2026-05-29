@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Agent toolkit (local dev only, not for deploy)
+.agent/
+
 # Secrets & local env
 .env
 .env.local
@@ -9,6 +12,12 @@ node_modules/
 # Generated playlist / scrape output
 playlist.m3u
 playlist.json
+film.m3u
+film.json
+*-test.m3u
+*-test.json
+film.crawl.lock
+film-crawl-log.txt
 
 # Logs & debug
 npm-debug.log*

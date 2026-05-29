@@ -1,7 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
 
-const DEFAULT_DIR = 'server_link';
+export const FOOTBALL_DIR = 'server_link/football';
+export const FILM_DIR = 'server_link/phim';
 
 /**
  * Read a single JSON config file and return a normalized crawl config object.
@@ -25,6 +26,12 @@ function parseConfigFile(raw, filePath) {
         ? String(groupNameRaw).trim()
         : undefined;
 
+    const filmTitleRaw = parsed.filmTitle ?? parsed.title;
+    const filmTitle =
+      filmTitleRaw !== undefined && filmTitleRaw !== null && String(filmTitleRaw).trim() !== ''
+        ? String(filmTitleRaw).trim()
+        : undefined;
+
     const itemSelectorRaw = parsed.itemSelector ?? parsed.listingItemSelector;
     const itemSelector =
       itemSelectorRaw !== undefined && itemSelectorRaw !== null && String(itemSelectorRaw).trim() !== ''
@@ -39,32 +46,27 @@ function parseConfigFile(raw, filePath) {
 
     if (!targetUrl) return null;
 
-    return { subCommand, targetUrl, limitArg, itemSelector, serverTabsSelector, groupName, configPath: filePath };
+    return {
+      subCommand,
+      targetUrl,
+      limitArg,
+      itemSelector,
+      serverTabsSelector,
+      groupName,
+      filmTitle,
+      configPath: filePath,
+    };
   } catch {
     return null;
   }
 }
 
-/**
- * Resolve a single crawl config (legacy — used by CLI fallback).
- * Reads the first available JSON in server_link/, merged with CLI/env defaults.
- */
-export async function resolveCrawlConfig(cliDefaults = {}) {
-  const configs = await resolveAllCrawlConfigs(cliDefaults);
-  return configs.length > 0 ? configs[0] : null;
-}
-
-/**
- * Resolve ALL crawl configs from every JSON file in server_link/.
- * Each file = one source to crawl. Falls back to CLI/env if no files found.
- */
-export async function resolveAllCrawlConfigs(cliDefaults = {}) {
-  const dir = process.env.SERVER_LINK_DIR || DEFAULT_DIR;
+async function readConfigsFromDir(dir, cliDefaults = {}) {
   const configs = [];
 
   try {
     const entries = await fs.readdir(dir);
-    const jsonFiles = entries.filter(f => f.endsWith('.json')).sort();
+    const jsonFiles = entries.filter((f) => f.endsWith('.json')).sort();
 
     for (const file of jsonFiles) {
       const filePath = path.join(dir, file);
@@ -82,21 +84,62 @@ export async function resolveAllCrawlConfigs(cliDefaults = {}) {
     }
   }
 
-  // Fallback: if no JSON files found, use CLI/env defaults
-  if (configs.length === 0) {
-    const subCommand = String(cliDefaults.subCommand ?? 'list').toLowerCase() === 'match' ? 'match' : 'list';
-    const targetUrl = String(cliDefaults.targetUrl ?? '').trim();
-    if (targetUrl) {
-      configs.push({
+  return configs;
+}
+
+function applyCliFallback(configs, cliDefaults) {
+  if (configs.length > 0) return configs;
+
+  const subCommand = String(cliDefaults.subCommand ?? 'list').toLowerCase() === 'match' ? 'match' : 'list';
+  const targetUrl = String(cliDefaults.targetUrl ?? '').trim();
+  if (targetUrl) {
+    return [
+      {
         subCommand,
         targetUrl,
         limitArg: cliDefaults.limitArg,
         itemSelector: undefined,
         serverTabsSelector: undefined,
+        groupName: undefined,
         configPath: '(cli/env fallback)',
-      });
-    }
+      },
+    ];
   }
 
   return configs;
+}
+
+/**
+ * Resolve ALL crawl configs from a directory of JSON files.
+ */
+export async function resolveAllCrawlConfigs(cliDefaults = {}, options = {}) {
+  const dir =
+    options.dir ??
+    process.env.SERVER_LINK_DIR ??
+    (options.category === 'film' ? process.env.SERVER_LINK_FILM_DIR || FILM_DIR : process.env.SERVER_LINK_FOOTBALL_DIR || FOOTBALL_DIR);
+
+  const configs = await readConfigsFromDir(dir);
+  return applyCliFallback(configs, cliDefaults);
+}
+
+/** Football sources: server_link/football/*.json */
+export async function resolveFootballConfigs(cliDefaults = {}) {
+  const dir = process.env.SERVER_LINK_FOOTBALL_DIR || FOOTBALL_DIR;
+  const configs = await readConfigsFromDir(dir);
+  return applyCliFallback(configs, cliDefaults);
+}
+
+/** Film sources: server_link/phim/*.json */
+export async function resolveFilmConfigs(cliDefaults = {}) {
+  const dir = process.env.SERVER_LINK_FILM_DIR || FILM_DIR;
+  return readConfigsFromDir(dir);
+}
+
+/**
+ * Resolve a single crawl config (legacy — used by CLI fallback).
+ * Reads the first available JSON in football folder.
+ */
+export async function resolveCrawlConfig(cliDefaults = {}) {
+  const configs = await resolveFootballConfigs(cliDefaults);
+  return configs.length > 0 ? configs[0] : null;
 }

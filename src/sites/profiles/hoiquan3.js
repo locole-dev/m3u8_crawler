@@ -22,6 +22,8 @@ async function prepareListingPage(page, { timeout }) {
   await sleep(800);
 }
 
+import { cleanHoiquanMatchTitle } from '../../matchTitle.js';
+
 /** Bỏ link chỉ là CTA cá cược / không phải trận */
 function filterListingMatch(m) {
   const href = (m.href || '').toLowerCase();
@@ -41,4 +43,5 @@ export const hoiquan3SiteProfile = {
   skipHtmlFetchFallback: false,
   prepareListingPage,
   filterListingMatch,
+  cleanMatchTitle: cleanHoiquanMatchTitle,
 };

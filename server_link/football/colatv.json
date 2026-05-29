@@ -1,0 +1,6 @@
+{
+  "subCommand": "list",
+  "targetUrl": "https://www.oastaug.com/",
+  "limit": 100,
+  "groupName": "Cola TV"
+}

@@ -2,9 +2,17 @@ import { defaultSiteProfile } from './profiles/default.js';
 import { hoiquan3SiteProfile } from './profiles/hoiquan3.js';
 import { cauthutvSiteProfile } from './profiles/cauthutv.js';
 import { khandaiaSiteProfile } from './profiles/khandaia.js';
+import { colatvSiteProfile } from './profiles/colatv.js';
+import { giovangSiteProfile } from './profiles/giovang.js';
 
-/** Thứ tự: site cụ thể trước, default cuối không dùng trong vòng lặp */
-const SPECIFIC_PROFILES = [hoiquan3SiteProfile, cauthutvSiteProfile, khandaiaSiteProfile];
+/** Bóng đá — không gồm profile phim (xem src/film/registry.js) */
+const SPECIFIC_PROFILES = [
+  hoiquan3SiteProfile,
+  cauthutvSiteProfile,
+  khandaiaSiteProfile,
+  colatvSiteProfile,
+  giovangSiteProfile,
+];
 
 export function resolveSiteProfile(listingUrl) {
   let host = '';

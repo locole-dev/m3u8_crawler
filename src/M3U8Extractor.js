@@ -19,6 +19,8 @@ chromium.use(stealth());
 export class M3U8Extractor {
   constructor(options = {}) {
     this.config = loadConfig(options);
+    this.resolveProfile = options.resolveProfile ?? resolveSiteProfile;
+    this.filmMode = Boolean(options.filmMode);
     this.browser = null;
     this.context = null;
     this.activeCaptures = new Set();
@@ -66,7 +68,7 @@ export class M3U8Extractor {
       await this.init();
     }
 
-    const profile = resolveSiteProfile(listingUrl);
+    const profile = this.resolveProfile(listingUrl);
     const primarySelector = itemSelector ?? profile.listingItemSelector ?? null;
     const selectors = primarySelector ? [primarySelector] : LISTING_ITEM_SELECTORS;
     const networkCap = profile.networkIdleCapMs ?? 8000;
@@ -89,7 +91,7 @@ export class M3U8Extractor {
         await sleep(800);
       }
 
-      const tryExtract = async () => this.#extractFirstMatchingLinks(page, selectors, listingUrl);
+      const tryExtract = async () => this.#extractFirstMatchingLinks(page, selectors, listingUrl, profile);
 
       let matches = await tryExtract();
       if (matches.length > 0) {
@@ -149,11 +151,18 @@ export class M3U8Extractor {
   }
 
   async extractAll(listingUrl, { limit = 100, itemSelector, serverTabsSelector } = {}) {
-    const profile = resolveSiteProfile(listingUrl);
+    const profile = this.resolveProfile(listingUrl);
     let matches = await this.listMatches(listingUrl, { itemSelector });
 
     if (typeof profile.filterListingMatch === 'function') {
       matches = matches.filter((m) => profile.filterListingMatch(m));
+    }
+
+    if (typeof profile.resolveListingTitle === 'function') {
+      matches = matches.map((m) => ({
+        ...m,
+        title: profile.resolveListingTitle(m) || m.title,
+      }));
     }
 
     // Lọc bỏ các trận "Sắp đấu" và "Kết thúc" để đỡ tốn thời gian chờ timeout
@@ -164,6 +173,13 @@ export class M3U8Extractor {
       const isFinished = norm.includes('ket thuc') || norm.includes('da dien ra');
       return !isUpcoming && !isFinished;
     });
+
+    if (typeof profile.cleanMatchTitle === 'function') {
+      matches = matches.map((m) => ({
+        ...m,
+        title: profile.cleanMatchTitle(m.title),
+      }));
+    }
 
     const selected = matches.slice(0, limit);
     const results = [];
@@ -231,9 +247,15 @@ export class M3U8Extractor {
     const requestPage = safeRequestPage(request);
 
     for (const capture of this.activeCaptures) {
-      const belongsToCapture = requestPage
-        ? capture.pages.has(requestPage)
-        : this.activeCaptures.size === 1;
+      let belongsToCapture = false;
+
+      if (this.filmMode && capture.mainPage) {
+        belongsToCapture = !this.#isJunkFilmRequest(request, capture);
+      } else {
+        belongsToCapture = requestPage
+          ? capture.pages.has(requestPage)
+          : this.activeCaptures.size === 1;
+      }
 
       if (belongsToCapture) {
         this.#collectM3U8Request(request, capture);
@@ -253,13 +275,42 @@ export class M3U8Extractor {
       await this.#actHuman(page);
       await sleep(500);
 
+      const profile = this.resolveProfile(matchUrl);
+
+      capture.mainPage = page;
+
+      if (typeof profile.prepareMatchPage === 'function') {
+        await profile.prepareMatchPage(page, { timeout: this.config.timeout });
+      }
+
+      await this.#closeExtraCapturePages(capture);
+
+      const serverTabs = serverTabsSelector ?? profile.serverTabsSelector ?? undefined;
+      const episodeTabs = this.filmMode ? profile.episodeTabsSelector : null;
+
+      // Phim bộ: luôn click hết tab tập (không return sớm khi tập 1 tự phát)
+      if (episodeTabs) {
+        if (profile.episodeNavigateByGoto) {
+          const episodes = await this.#collectEpisodeTabItems(page, episodeTabs, profile, matchUrl);
+          await this.#extractEpisodesByGoto(capture, page, episodes, profile);
+          await this.#retryMissingFromEpisodeList(capture, page, episodes, profile, matchUrl);
+          await this.#retryMissingFromEpisodeList(capture, page, episodes, profile, matchUrl, {
+            retryPass: 2,
+          });
+        } else {
+          await this.#extractFromServerTabs(capture, episodeTabs, profile);
+        }
+        this.#dedupeStreamsPerEpisode(capture);
+        return this.#buildMatchResult(capture, matchUrl, title, page);
+      }
+
       if (capture.results.length > 0) {
         await sleep(this.config.collectMs);
         return this.#buildMatchResult(capture, matchUrl, title, page);
       }
 
       await this.#extractFromDefaultPlayer(capture);
-      await this.#extractFromServerTabs(capture, serverTabsSelector);
+      await this.#extractFromServerTabs(capture, serverTabs, profile);
 
       return this.#buildMatchResult(capture, matchUrl, title, page);
     } catch (error) {
@@ -278,21 +329,182 @@ export class M3U8Extractor {
     }
   }
 
-  async #extractFromServerTabs(capture, preferredSelector) {
-    const activePage = this.#latestOpenPage(capture);
-    const groups = await this.#findServerTabGroups(activePage, preferredSelector);
+  async #collectEpisodeTabItems(page, selector, profile, matchUrl) {
+    const groups = await this.#findServerTabGroups(page, selector, profile);
+    const byNum = new Map();
+
+    for (const item of groups.flatMap((g) => g.items)) {
+      const n = episodeNumberFromLabel(item.label);
+      if (n === null || !item.href) continue;
+      if (typeof profile?.filterEpisodeHref === 'function' && !profile.filterEpisodeHref(item.href, matchUrl)) {
+        continue;
+      }
+      if (!byNum.has(n)) byNum.set(n, item);
+    }
+
+    return [...byNum.values()].sort(
+      (a, b) => episodeNumberFromLabel(a.label) - episodeNumberFromLabel(b.label),
+    );
+  }
+
+  async #extractEpisodesByGoto(capture, page, episodes, profile, options = {}) {
+    const streamWaitMs =
+      options.streamWaitMs ??
+      (options.retryPass === 2
+        ? (profile.filmRetryStreamWaitMs ?? 18000)
+        : (profile.filmStreamWaitMs ?? 12000));
+    const gotoSleep = profile.filmGotoSleepMs ?? 1200;
+
+    for (const [index, item] of episodes.entries()) {
+      capture.currentServerLabel = item.label;
+      const beforeCount = capture.results.length;
+
+      await page.goto(item.href, {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(50000, this.config.timeout),
+      });
+      await sleep(gotoSleep);
+      await this.#clickPlayAcrossPages(capture);
+      await this.#closeExtraCapturePages(capture);
+      await this.#waitForQuiet(page, Math.min(5000, this.config.timeout));
+      const got = await this.#waitForNewStream(capture, beforeCount, streamWaitMs);
+
+      if (!got && capture.results.length === beforeCount) {
+        await this.#clickPlayAcrossPages(capture);
+        await this.#waitForNewStream(capture, beforeCount, Math.min(streamWaitMs, 10000));
+      }
+
+      if (index < episodes.length - 1) {
+        await sleep(500);
+      }
+    }
+  }
+
+  async #retryMissingFromEpisodeList(capture, page, episodes, profile, matchUrl, options = {}) {
+    const capturedNums = new Set();
+    for (const s of capture.results) {
+      const n = episodeNumberFromLabel(s.server);
+      if (n !== null) capturedNums.add(n);
+    }
+
+    const missing = episodes.filter((item) => {
+      const n = episodeNumberFromLabel(item.label);
+      return n !== null && !capturedNums.has(n);
+    });
+
+    if (missing.length === 0) return;
+
+    const pass = options.retryPass ?? 1;
+    console.log(`  [phim] retry (lần ${pass}) ${missing.length} tập thiếu...`);
+    await this.#extractEpisodesByGoto(capture, page, missing, profile, {
+      retryPass: pass,
+    });
+  }
+
+  /** Phim: mỗi tập giữ một m3u8 (ưu tiên master index.m3u8 không có /kb/). */
+  #dedupeStreamsPerEpisode(capture) {
+    if (!this.filmMode) return;
+    const byEpisode = new Map();
+
+    for (const stream of capture.results) {
+      const key = stream.server || 'default';
+      const existing = byEpisode.get(key);
+      const score = streamScore(stream.url);
+
+      if (!existing || score > streamScore(existing.url)) {
+        byEpisode.set(key, stream);
+      }
+    }
+
+    capture.results = [...byEpisode.values()];
+    capture.seen = new Set(capture.results.map((s) => s.url));
+  }
+
+  async #closeExtraCapturePages(capture) {
+    const main = capture.mainPage;
+    if (!main) return;
+
+    let mainHost = '';
+    try {
+      mainHost = new URL(main.url()).hostname.replace(/^www\./, '');
+    } catch {
+      return;
+    }
+
+    const keepHostPart = (host) =>
+      host === mainHost ||
+      host.includes('rophim') ||
+      host.includes('cobephim') ||
+      host.includes('darkbytes') ||
+      host.includes('kkphimplayer') ||
+      host.includes('opstream') ||
+      host.includes('api.');
+
+    for (const p of [...capture.pages]) {
+      if (p === main || p.isClosed()) continue;
+
+      let shouldClose = true;
+      try {
+        const host = new URL(p.url()).hostname.replace(/^www\./, '');
+        if (keepHostPart(host)) shouldClose = false;
+      } catch {
+        shouldClose = true;
+      }
+
+      if (shouldClose) {
+        await p.close().catch(() => {});
+        capture.pages.delete(p);
+      }
+    }
+
+    capture.lastPage = main;
+  }
+
+  #isJunkFilmRequest(request, capture) {
+    if (!this.filmMode) return false;
+
+    const url = `${request.url()} ${safeRequestPageUrl(request) || ''} ${safeFrameUrl(request) || ''}`.toLowerCase();
+    const junkHosts = ['excavatenearbywand', 'doubleclick', 'googlesyndication', 'popads', 'adnxs'];
+    return junkHosts.some((h) => url.includes(h));
+  }
+
+  async #extractFromServerTabs(capture, preferredSelector, profile = null) {
+    const activePage = capture.mainPage ?? this.#latestOpenPage(capture);
+    const groups = await this.#findServerTabGroups(activePage, preferredSelector, profile);
 
     if (groups.length === 0) {
       return;
     }
 
     let tabOrder = 0;
+    const seenEpisodeNums = this.filmMode ? new Set() : null;
+    const quietMs = this.filmMode ? 4000 : 5000;
+    const streamWaitMs = this.filmMode
+      ? profile?.episodeNavigateByGoto
+        ? 12000
+        : 8000
+      : 6000;
+    const collectCap = this.filmMode ? Math.min(this.config.collectMs, 1500) : this.config.collectMs;
 
     for (const group of groups) {
       for (const item of group.items) {
+        if (this.filmMode && typeof profile?.filterTabLabel === 'function' && !profile.filterTabLabel(item.label)) {
+          continue;
+        }
+
+        if (seenEpisodeNums) {
+          const epNum = episodeNumberFromLabel(item.label);
+          if (epNum !== null) {
+            if (seenEpisodeNums.has(epNum)) continue;
+            seenEpisodeNums.add(epNum);
+          }
+        }
+
         tabOrder += 1;
         const beforeCount = capture.results.length;
         capture.currentServerLabel = item.label || `server-${tabOrder}`;
+
+        const workPage = capture.mainPage ?? this.#latestOpenPage(capture);
 
         await group.frame
           .locator(group.selector)
@@ -300,13 +512,15 @@ export class M3U8Extractor {
           .click({ timeout: 2000 })
           .catch(() => {});
 
-        await this.#waitForQuiet(this.#latestOpenPage(capture), Math.min(5000, this.config.timeout));
-        await this.#actHuman(this.#latestOpenPage(capture));
-        await this.#clickPlayAcrossPages(capture);
-        await this.#waitForNewStream(capture, beforeCount, Math.min(6000, this.config.timeout));
+        await this.#closeExtraCapturePages(capture);
 
-        if (capture.results.length > beforeCount) {
-          await sleep(this.config.collectMs);
+        await this.#waitForQuiet(workPage, Math.min(quietMs, this.config.timeout));
+        await this.#actHuman(workPage);
+        await this.#clickPlayAcrossPages(capture);
+        const got = await this.#waitForNewStream(capture, beforeCount, Math.min(streamWaitMs, this.config.timeout));
+
+        if (got || capture.results.length > beforeCount) {
+          await sleep(collectCap);
         }
       }
     }
@@ -349,6 +563,7 @@ export class M3U8Extractor {
       waiters: new Set(),
       currentServerLabel: null,
       lastPage: null,
+      mainPage: null,
     };
   }
 
@@ -381,6 +596,10 @@ export class M3U8Extractor {
 
   #collectM3U8Request(request, capture) {
     const requestUrl = request.url();
+
+    if (this.#isJunkFilmRequest(request, capture)) {
+      return null;
+    }
 
     if (capture.seen.has(requestUrl)) {
       return null;
@@ -498,7 +717,7 @@ export class M3U8Extractor {
     return clicked;
   }
 
-  async #findServerTabGroups(page, preferredSelector) {
+  async #findServerTabGroups(page, preferredSelector, profile = null) {
     if (!page || page.isClosed()) {
       return [];
     }
@@ -509,7 +728,7 @@ export class M3U8Extractor {
 
     for (const frame of frames) {
       for (const selector of selectors) {
-        const group = await this.#readVisibleServerItems(frame, selector);
+        const group = await this.#readVisibleServerItems(frame, selector, profile);
 
         if (group.items.length > 0) {
           groups.push(group);
@@ -520,12 +739,13 @@ export class M3U8Extractor {
     return groups;
   }
 
-  async #readVisibleServerItems(frame, selector) {
+  async #readVisibleServerItems(frame, selector, profile = null) {
     const locator = frame.locator(selector);
     const count = await locator.count().catch(() => 0);
     const items = [];
 
-    for (let index = 0; index < Math.min(count, 30); index += 1) {
+    const maxItems = this.filmMode ? 40 : 30;
+    for (let index = 0; index < Math.min(count, maxItems); index += 1) {
       const item = locator.nth(index);
       const visible = await item.isVisible({ timeout: 300 }).catch(() => false);
 
@@ -533,22 +753,31 @@ export class M3U8Extractor {
         continue;
       }
 
-      const label = await item
+      const meta = await item
         .evaluate((element) => {
           const text = (element.innerText || element.textContent)?.replace(/\s+/g, ' ').trim();
-          return (
-            text ||
-            element.getAttribute('aria-label') ||
-            element.getAttribute('title') ||
-            element.getAttribute('data-server') ||
-            ''
-          );
+          const anchor = element.matches('a[href]') ? element : element.querySelector('a[href]');
+          return {
+            label:
+              text ||
+              element.getAttribute('aria-label') ||
+              element.getAttribute('title') ||
+              element.getAttribute('data-server') ||
+              '',
+            href: anchor?.href || '',
+          };
         })
-        .catch(() => '');
+        .catch(() => ({ label: '', href: '' }));
+
+      const normalized = meta.label || `server-${items.length + 1}`;
+      if (typeof profile?.filterTabLabel === 'function' && !profile.filterTabLabel(normalized)) {
+        continue;
+      }
 
       items.push({
         index,
-        label: label || `server-${items.length + 1}`,
+        label: normalized,
+        href: meta.href || undefined,
       });
     }
 
@@ -559,37 +788,46 @@ export class M3U8Extractor {
     };
   }
 
-  async #extractLinks(page, selector) {
+  async #extractLinks(page, selector, profile) {
     const locator = page.locator(selector);
     const count = await locator.count().catch(() => 0);
+    const cardSelector = profile?.listingCardSelector ?? null;
 
     if (count === 0) {
       return [];
     }
 
     return locator
-      .evaluateAll((elements) =>
-        elements
-          .map((element) => {
-            const anchor = element.matches('a[href]')
-              ? element
-              : element.querySelector('a[href]');
+      .evaluateAll(
+        (elements, cardSel) =>
+          elements
+            .map((element) => {
+              const anchor = element.matches('a[href]')
+                ? element
+                : element.querySelector('a[href]');
 
-            if (!anchor) {
-              return null;
-            }
+              if (!anchor) {
+                return null;
+              }
 
-            const href = anchor.href;
-            const title =
-              anchor.getAttribute('aria-label') ||
-              anchor.getAttribute('title') ||
-              (anchor.innerText || anchor.textContent)?.replace(/\s+/g, ' ').trim() ||
-              (element.innerText || element.textContent)?.replace(/\s+/g, ' ').trim() ||
-              href;
+              const href = anchor.href;
+              const title =
+                anchor.getAttribute('aria-label') ||
+                anchor.getAttribute('title') ||
+                (anchor.innerText || anchor.textContent)?.replace(/\s+/g, ' ').trim() ||
+                (element.innerText || element.textContent)?.replace(/\s+/g, ' ').trim() ||
+                href;
 
-            return { title, href };
-          })
-          .filter(Boolean)
+              let cardText = '';
+              if (cardSel) {
+                const card = anchor.closest(cardSel) || element.closest(cardSel);
+                cardText = (card?.innerText || card?.textContent || '').replace(/\s+/g, ' ').trim();
+              }
+
+              return { title, href, cardText };
+            })
+            .filter(Boolean),
+        cardSelector,
       )
       .then((links) =>
         links.filter(
@@ -626,11 +864,14 @@ export class M3U8Extractor {
     }
   }
 
-  async #extractFirstMatchingLinks(page, selectors, listingUrl) {
+  async #extractFirstMatchingLinks(page, selectors, listingUrl, profile) {
     let allMatches = [];
     for (const selector of selectors) {
       const matches = filterLikelyMatchLinks(
-        filterSameOriginMatches(dedupeByHref(await this.#extractLinks(page, selector)), listingUrl)
+        filterSameOriginMatches(
+          dedupeByHref(await this.#extractLinks(page, selector, profile)),
+          listingUrl,
+        ),
       );
       allMatches.push(...matches);
     }
@@ -899,6 +1140,19 @@ function defaultDesktopUserAgent(browserVersion) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function episodeNumberFromLabel(label) {
+  const m = String(label || '').match(/Tập\s*(\d+)/i);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+/** Higher = preferred master playlist for one episode. */
+function streamScore(url) {
+  const u = String(url).toLowerCase();
+  if (/\/\d+kb\//.test(u)) return 1;
+  if (u.endsWith('/index.m3u8') || u.includes('/index.m3u8?')) return 3;
+  return 2;
 }
 
 async function raceWithTimeout(promises, timeout, onTimeout = () => null) {

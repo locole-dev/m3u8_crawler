@@ -1,0 +1,6 @@
+{
+  "subCommand": "list",
+  "targetUrl": "https://sv2.hoiquan4.live/trang-chu",
+  "limit": 100,
+  "groupName": "Hội Quán"
+}
