@@ -1,3 +1,5 @@
+import { FILM_AUDIO_TAB_SELECTORS } from '../../film/audioTrack.js';
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -75,7 +77,11 @@ export const rophimSiteProfile = {
   matchHost,
   listingItemSelector: 'a[href*="/xem-phim/"]',
   /** Click từng tập trên cùng trang — giống server tabs khi crawl match */
-  episodeTabsSelector: '[class*="episode"] a',
+  episodeTabsSelector: '[class*="episode"] a, [class*="episode"] button, [class*="ep-item"] a, [class*="ep-item"] button',
+  /** RoPhim: bắt buộc chọn server Thuyết minh / Lồng tiếng (không Vietsub) */
+  preferThuyetMinhAudio: true,
+  audioTabsSelectors: FILM_AUDIO_TAB_SELECTORS,
+  filmStreamWaitMs: 14000,
   serverTabsSelector: null,
   filterTabLabel,
   filterEpisodeHref,

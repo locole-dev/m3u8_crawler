@@ -9,6 +9,8 @@ export const cobephimSiteProfile = {
   ...rophimSiteProfile,
   id: 'cobephim',
   matchHost,
+  /** CôBe Phim: chưa chọn server TM — crawl như cũ (goto từng tập) */
+  preferThuyetMinhAudio: false,
   episodeNavigateByGoto: true,
   filmStreamWaitMs: 16000,
   filmRetryStreamWaitMs: 20000,

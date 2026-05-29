@@ -2,6 +2,7 @@ import {
   pickPlaybackHeaders,
   sanitizeForExtInf,
 } from '../playlist.js';
+import { resolveFilmPosterUrl } from './poster.js';
 
 function sanitizeForQuotedAttr(value) {
   return String(value)
@@ -58,6 +59,9 @@ export function buildFilmCatalogPlaylist(filmEntries) {
     const filmTitle = resolveFilmTitle(result, cfg);
     const groupTitle = sanitizeForQuotedAttr(filmTitle);
     const seriesLabel = sanitizeForExtInf(filmTitle);
+    const posterUrl = sanitizeForQuotedAttr(
+      resolveFilmPosterUrl(result?.posterUrl, filmTitle),
+    );
 
     lines.push(`#EXTGRP:${groupTitle}`);
 
@@ -67,7 +71,7 @@ export function buildFilmCatalogPlaylist(filmEntries) {
       const displayTitle = `${seriesLabel} | ${epLabel}`;
 
       lines.push(
-        `#EXTINF:-1 tvg-name="${displayTitle}" group-title="${groupTitle}" tvg-group="${groupTitle}",${displayTitle}`,
+        `#EXTINF:-1 tvg-logo="${posterUrl}" tvg-name="${displayTitle}" group-title="${groupTitle}" tvg-group="${groupTitle}",${displayTitle}`,
       );
 
       if (headers.Referer) {

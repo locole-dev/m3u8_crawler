@@ -8,6 +8,8 @@ import {
   SERVER_SELECTORS,
 } from './selectors.js';
 import { resolveSiteProfile } from './sites/registry.js';
+import { selectPreferredFilmAudio, scoreFilmStreamUrl } from './film/audioTrack.js';
+import { extractFilmPosterUrl } from './film/poster.js';
 
 const { chromium } = playwrightExtra;
 const M3U8_URL_RE = /\.m3u8(\?|$)/i;
@@ -258,6 +260,9 @@ export class M3U8Extractor {
       }
 
       if (belongsToCapture) {
+        if (this.filmMode && capture.filmAudioReady === false) {
+          continue;
+        }
         this.#collectM3U8Request(request, capture);
       }
     }
@@ -283,6 +288,11 @@ export class M3U8Extractor {
         await profile.prepareMatchPage(page, { timeout: this.config.timeout });
       }
 
+      if (this.filmMode) {
+        capture.posterUrl = await extractFilmPosterUrl(page, profile);
+        capture.filmAudioReady = !profile?.preferThuyetMinhAudio;
+      }
+
       await this.#closeExtraCapturePages(capture);
 
       const serverTabs = serverTabsSelector ?? profile.serverTabsSelector ?? undefined;
@@ -292,13 +302,20 @@ export class M3U8Extractor {
       if (episodeTabs) {
         if (profile.episodeNavigateByGoto) {
           const episodes = await this.#collectEpisodeTabItems(page, episodeTabs, profile, matchUrl);
+          if (episodes.length > 0 && profile?.preferThuyetMinhAudio) {
+            const countBefore = capture.results.length;
+            capture.filmAudioReady = false;
+            await this.#applyFilmAudioTrack(capture, page, profile);
+            this.#discardStreamsSince(capture, countBefore);
+            await sleep(600);
+          }
           await this.#extractEpisodesByGoto(capture, page, episodes, profile);
           await this.#retryMissingFromEpisodeList(capture, page, episodes, profile, matchUrl);
           await this.#retryMissingFromEpisodeList(capture, page, episodes, profile, matchUrl, {
             retryPass: 2,
           });
         } else {
-          await this.#extractFromServerTabs(capture, episodeTabs, profile);
+          await this.#extractFilmEpisodesByClick(capture, page, episodeTabs, profile, matchUrl);
         }
         this.#dedupeStreamsPerEpisode(capture);
         return this.#buildMatchResult(capture, matchUrl, title, page);
@@ -307,6 +324,16 @@ export class M3U8Extractor {
       if (capture.results.length > 0) {
         await sleep(this.config.collectMs);
         return this.#buildMatchResult(capture, matchUrl, title, page);
+      }
+
+      if (this.filmMode) {
+        const countBefore = capture.results.length;
+        const audio = await this.#applyFilmAudioTrack(capture, page, profile);
+        this.#discardStreamsSince(capture, countBefore);
+        if (this.#skipEpisodeForAudio(profile, audio)) {
+          console.log(`  [phim] chỉ có Vietsub — không stream: ${matchUrl}`);
+          return this.#buildMatchResult(capture, matchUrl, title, page);
+        }
       }
 
       await this.#extractFromDefaultPlayer(capture);
@@ -330,21 +357,161 @@ export class M3U8Extractor {
   }
 
   async #collectEpisodeTabItems(page, selector, profile, matchUrl) {
+    const targets = await this.#collectEpisodeClickTargets(page, selector, profile);
+    return targets
+      .filter((t) => t.href && (!profile?.filterEpisodeHref || profile.filterEpisodeHref(t.href, matchUrl)))
+      .map(({ label, href }) => ({ label, href }));
+  }
+
+  /** Tập N trên cùng trang (RoPhim click) — không bắt buộc href */
+  async #collectEpisodeClickTargets(page, selector, profile) {
     const groups = await this.#findServerTabGroups(page, selector, profile);
     const byNum = new Map();
 
-    for (const item of groups.flatMap((g) => g.items)) {
-      const n = episodeNumberFromLabel(item.label);
-      if (n === null || !item.href) continue;
-      if (typeof profile?.filterEpisodeHref === 'function' && !profile.filterEpisodeHref(item.href, matchUrl)) {
-        continue;
+    for (const group of groups) {
+      for (const item of group.items) {
+        if (typeof profile?.filterTabLabel === 'function' && !profile.filterTabLabel(item.label)) {
+          continue;
+        }
+        const n = episodeNumberFromLabel(item.label);
+        if (n === null) continue;
+        if (!byNum.has(n)) {
+          byNum.set(n, {
+            label: item.label,
+            href: item.href,
+            index: item.index,
+            selector: group.selector,
+            frame: group.frame,
+          });
+        }
       }
-      if (!byNum.has(n)) byNum.set(n, item);
     }
 
     return [...byNum.values()].sort(
       (a, b) => episodeNumberFromLabel(a.label) - episodeNumberFromLabel(b.label),
     );
+  }
+
+  async #extractFilmEpisodesByClick(capture, page, episodeTabs, profile, matchUrl) {
+    const episodes = await this.#collectEpisodeClickTargets(page, episodeTabs, profile);
+    console.log(`  [phim] ${episodes.length} tập (click)`);
+
+    if (episodes.length === 0) return;
+
+    if (profile?.preferThuyetMinhAudio) {
+      const countBefore = capture.results.length;
+      capture.filmAudioReady = false;
+      const audioFirst = await this.#applyFilmAudioTrack(capture, page, profile);
+      this.#discardStreamsSince(capture, countBefore);
+      if (this.#skipEpisodeForAudio(profile, audioFirst)) {
+        console.log(`  [phim] không chọn được Thuyết minh: ${matchUrl}`);
+        return;
+      }
+      await sleep(800);
+    }
+
+    const quietMs = 5000;
+    const streamWaitMs = profile.filmStreamWaitMs ?? 12000;
+    const collectCap = Math.min(this.config.collectMs, 1500);
+
+    for (const [index, item] of episodes.entries()) {
+      capture.currentServerLabel = item.label;
+      const beforeCount = capture.results.length;
+      const workPage = capture.mainPage ?? page;
+
+      if (profile?.preferThuyetMinhAudio) {
+        capture.filmAudioReady = false;
+        const audioBefore = await this.#applyFilmAudioTrack(capture, workPage, profile);
+        this.#discardStreamsSince(capture, beforeCount);
+        if (this.#skipEpisodeForAudio(profile, audioBefore)) {
+          console.log(`  [phim] bỏ tập (không có Thuyết minh): ${item.label}`);
+          continue;
+        }
+      } else {
+        capture.filmAudioReady = true;
+      }
+
+      await item.frame
+        .locator(item.selector)
+        .nth(item.index)
+        .click({ timeout: 3000 })
+        .catch(() => {});
+
+      await sleep(500);
+
+      if (profile?.preferThuyetMinhAudio) {
+        capture.filmAudioReady = false;
+        const audioAfter = await this.#applyFilmAudioTrack(capture, workPage, profile);
+        if (this.#skipEpisodeForAudio(profile, audioAfter)) {
+          console.log(`  [phim] bỏ tập sau click (chỉ Vietsub): ${item.label}`);
+          continue;
+        }
+      }
+
+      await this.#closeExtraCapturePages(capture);
+      await this.#waitForQuiet(workPage, Math.min(quietMs, this.config.timeout));
+      await this.#actHuman(workPage);
+      await this.#clickPlayAcrossPages(capture);
+      const got = await this.#waitForNewStream(capture, beforeCount, Math.min(streamWaitMs, this.config.timeout));
+
+      if (!got && capture.results.length === beforeCount) {
+        await this.#clickPlayAcrossPages(capture);
+        await this.#waitForNewStream(capture, beforeCount, Math.min(streamWaitMs, 10000));
+      }
+
+      if (capture.results.length > beforeCount) {
+        await sleep(collectCap);
+      }
+
+      if (index < episodes.length - 1) {
+        await sleep(400);
+      }
+    }
+
+    if (profile?.preferThuyetMinhAudio) {
+      await this.#retryMissingFilmEpisodesByClick(capture, page, episodes, profile, {
+        quietMs,
+        streamWaitMs,
+        collectCap,
+      });
+    }
+  }
+
+  async #retryMissingFilmEpisodesByClick(capture, page, episodes, profile, timings) {
+    if (!profile?.preferThuyetMinhAudio) return;
+    const capturedNums = new Set();
+    for (const s of capture.results) {
+      const n = episodeNumberFromLabel(s.server);
+      if (n !== null) capturedNums.add(n);
+    }
+
+    const missing = episodes.filter((item) => {
+      const n = episodeNumberFromLabel(item.label);
+      return n !== null && !capturedNums.has(n);
+    });
+
+    if (missing.length === 0) return;
+
+    console.log(`  [phim] retry ${missing.length} tập thiếu (click)...`);
+
+    for (const item of missing) {
+      capture.currentServerLabel = item.label;
+      const beforeCount = capture.results.length;
+
+      capture.filmAudioReady = false;
+      const audioOk = await this.#applyFilmAudioTrack(capture, page, profile);
+      this.#discardStreamsSince(capture, beforeCount);
+      if (this.#skipEpisodeForAudio(profile, audioOk)) continue;
+
+      await item.frame.locator(item.selector).nth(item.index).click({ timeout: 3000 }).catch(() => {});
+      await sleep(600);
+      if (profile?.preferThuyetMinhAudio) {
+        await this.#applyFilmAudioTrack(capture, page, profile);
+      }
+      await this.#closeExtraCapturePages(capture);
+      await this.#clickPlayAcrossPages(capture);
+      await this.#waitForNewStream(capture, beforeCount, timings.streamWaitMs + 4000);
+    }
   }
 
   async #extractEpisodesByGoto(capture, page, episodes, profile, options = {}) {
@@ -358,12 +525,27 @@ export class M3U8Extractor {
     for (const [index, item] of episodes.entries()) {
       capture.currentServerLabel = item.label;
       const beforeCount = capture.results.length;
+      capture.filmAudioReady = !profile?.preferThuyetMinhAudio;
 
       await page.goto(item.href, {
         waitUntil: 'domcontentloaded',
         timeout: Math.min(50000, this.config.timeout),
       });
       await sleep(gotoSleep);
+
+      if (typeof profile.prepareMatchPage === 'function') {
+        await profile.prepareMatchPage(page, { timeout: Math.min(25000, this.config.timeout) });
+      }
+
+      if (profile?.preferThuyetMinhAudio) {
+        const audioBefore = await this.#applyFilmAudioTrack(capture, page, profile);
+        this.#discardStreamsSince(capture, beforeCount);
+        if (this.#skipEpisodeForAudio(profile, audioBefore)) {
+          console.log(`  [phim] bỏ tập (không có Thuyết minh): ${item.label}`);
+          continue;
+        }
+      }
+
       await this.#clickPlayAcrossPages(capture);
       await this.#closeExtraCapturePages(capture);
       await this.#waitForQuiet(page, Math.min(5000, this.config.timeout));
@@ -409,9 +591,9 @@ export class M3U8Extractor {
     for (const stream of capture.results) {
       const key = stream.server || 'default';
       const existing = byEpisode.get(key);
-      const score = streamScore(stream.url);
+      const score = this.filmMode ? scoreFilmStreamUrl(stream.url) : streamScore(stream.url);
 
-      if (!existing || score > streamScore(existing.url)) {
+      if (!existing || score > (this.filmMode ? scoreFilmStreamUrl(existing.url) : streamScore(existing.url))) {
         byEpisode.set(key, stream);
       }
     }
@@ -506,11 +688,32 @@ export class M3U8Extractor {
 
         const workPage = capture.mainPage ?? this.#latestOpenPage(capture);
 
+        if (this.filmMode) {
+          capture.filmAudioReady = false;
+          const audioBefore = await this.#applyFilmAudioTrack(capture, workPage, profile);
+          this.#discardStreamsSince(capture, beforeCount);
+          if (this.#skipEpisodeForAudio(profile, audioBefore)) {
+            console.log(`  [phim] bỏ tập (không có Thuyết minh): ${item.label}`);
+            continue;
+          }
+        }
+
         await group.frame
           .locator(group.selector)
           .nth(item.index)
           .click({ timeout: 2000 })
           .catch(() => {});
+
+        await sleep(this.filmMode ? 500 : 200);
+
+        if (this.filmMode && profile?.preferThuyetMinhAudio) {
+          capture.filmAudioReady = false;
+          const audioAfter = await this.#applyFilmAudioTrack(capture, workPage, profile);
+          if (this.#skipEpisodeForAudio(profile, audioAfter)) {
+            console.log(`  [phim] bỏ tập sau click (chỉ Vietsub): ${item.label}`);
+            continue;
+          }
+        }
 
         await this.#closeExtraCapturePages(capture);
 
@@ -534,7 +737,36 @@ export class M3U8Extractor {
       title: title ?? (await this.#safeTitle(finalPage)),
       pageUrl: safePageUrl(finalPage),
       streams: capture.results,
+      posterUrl: capture.posterUrl ?? null,
     };
+  }
+
+  async #applyFilmAudioTrack(capture, page, profile) {
+    if (!profile?.preferThuyetMinhAudio) {
+      capture.filmAudioReady = true;
+      return { ok: true, reason: 'audio-select-disabled', label: null };
+    }
+
+    const result = await selectPreferredFilmAudio(page, profile);
+    if (result.ok) {
+      capture.filmAudioReady = true;
+      if (result.label) {
+        console.log(`  [phim] audio: ${result.label}`);
+      }
+    } else {
+      capture.filmAudioReady = false;
+    }
+    return result;
+  }
+
+  #skipEpisodeForAudio(profile, audioResult) {
+    return Boolean(profile?.preferThuyetMinhAudio) && !audioResult?.ok;
+  }
+
+  #discardStreamsSince(capture, countBefore) {
+    if (capture.results.length <= countBefore) return;
+    capture.results = capture.results.slice(0, countBefore);
+    capture.seen = new Set(capture.results.map((s) => s.url));
   }
 
   async #extractFromDefaultPlayer(capture) {
@@ -564,6 +796,8 @@ export class M3U8Extractor {
       currentServerLabel: null,
       lastPage: null,
       mainPage: null,
+      filmAudioReady: !this.filmMode,
+      posterUrl: null,
     };
   }
 

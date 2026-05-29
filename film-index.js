@@ -19,9 +19,11 @@ async function runOnce(subCommand, targetUrl, outputPrefix) {
 
   try {
     await extractor.init();
+    console.log(`[phim] crawl: ${targetUrl}`);
     let result;
     if (subCommand === 'match' && targetUrl) {
       result = await extractor.extractFromMatch(targetUrl);
+      console.log(`[phim] xong: ${result?.streams?.length ?? 0} tập`);
     } else if (targetUrl) {
       const list = await extractor.extractAll(targetUrl, { limit: 100 });
       const playlist = buildFilmCatalogPlaylist(list.map((r) => ({ result: r, cfg })));
