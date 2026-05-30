@@ -4,9 +4,10 @@ import fs from 'fs/promises';
 import express from 'express';
 import cors from 'cors';
 import { FilmExtractor } from './src/film/FilmExtractor.js';
-import { crawlFilmSourcesOnce } from './src/film/crawlSources.js';
+import { crawlFilmSourcesOnce, crawlOneFilmSource } from './src/film/crawlSources.js';
 import { buildFilmCatalogPlaylist } from './src/film/playlist.js';
 import { resolveFilmConfigs } from './src/loadServerLinkConfig.js';
+import { episodeNumberFromLabel } from './src/film/audioTrack.js';
 import { hcmLogPrefix } from './src/formatTime.js';
 import { FILM_JSON_PATH, FILM_M3U_PATH } from './src/film/paths.js';
 
@@ -25,7 +26,12 @@ async function runOnce(subCommand, targetUrl, outputPrefix) {
     let result;
     if (subCommand === 'match' && targetUrl) {
       result = await extractor.extractFromMatch(targetUrl);
-      console.log(`[phim] xong: ${result?.streams?.length ?? 0} tập`);
+      const epCount = new Set(
+        (result?.streams ?? [])
+          .map((s) => episodeNumberFromLabel(s.server))
+          .filter((n) => n !== null),
+      ).size;
+      console.log(`[phim] xong: ${epCount} tập`);
     } else if (targetUrl) {
       const list = await extractor.extractAll(targetUrl, { limit: 100 });
       const playlist = buildFilmCatalogPlaylist(list.map((r) => ({ result: r, cfg })));
@@ -150,6 +156,17 @@ async function main() {
     return;
   }
 
+  if (cmd === 'crawl-one') {
+    const specifier = args[1];
+    if (!specifier) {
+      printUsage();
+      process.exitCode = 1;
+      return;
+    }
+    await crawlOneFilmSource(specifier, 'Manual (one)');
+    return;
+  }
+
   if (cmd === 'match') {
     const url = args[1];
     const out = args[2];
@@ -169,6 +186,7 @@ function printUsage() {
   console.error('Film crawler:');
   console.error('  node film-index.js serve [port]     # crawl 1 lần lúc startup');
   console.error('  node film-index.js crawl [--force]  # crawl lại (force bỏ lock)');
+  console.error('  node film-index.js crawl-one <slug|json-path|url>');
   console.error('  node film-index.js match <url>');
   console.error('');
   console.error('  Config: server_link/phim/*.json — thêm "filmTitle" cho tên nhóm');

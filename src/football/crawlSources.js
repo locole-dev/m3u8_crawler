@@ -5,12 +5,17 @@ import { buildIptvPlaylist, parseLimit } from '../playlist.js';
 import { resolveSiteProfile } from '../sites/registry.js';
 import { hcmLogPrefix } from '../formatTime.js';
 
-export async function crawlFootballSources(label, cliDefaults = {}) {
+export async function crawlFootballSources(label, cliDefaults = {}, options = {}) {
   const configs = await resolveFootballConfigs(cliDefaults);
   if (configs.length === 0) {
     console.error(`${hcmLogPrefix()} [bong-da] ${label}: no configs in server_link/football/.`);
     return { results: [], playlist: '#EXTM3U\n' };
   }
+
+  const envCap = process.env.FOOTBALL_CRAWL_LIMIT
+    ? parseLimit(process.env.FOOTBALL_CRAWL_LIMIT, 100)
+    : undefined;
+  const capPerSite = options.limitPerSite ?? envCap;
 
   const extractor = new M3U8Extractor();
   await extractor.init();
@@ -22,7 +27,9 @@ export async function crawlFootballSources(label, cliDefaults = {}) {
     for (const cfg of configs) {
       console.log(`${hcmLogPrefix()} [bong-da] ${label}: ${cfg.targetUrl} (${cfg.configPath})`);
       try {
-        const limit = parseLimit(cfg.limitArg, 100);
+        const limit = capPerSite
+          ? Math.min(parseLimit(cfg.limitArg, 100), capPerSite)
+          : parseLimit(cfg.limitArg, 100);
         const results = await extractor.extractAll(cfg.targetUrl, {
           limit,
           itemSelector: cfg.itemSelector,

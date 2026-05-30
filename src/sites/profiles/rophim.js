@@ -241,7 +241,13 @@ export const rophimSiteProfile = {
   /** RoPhim: bắt buộc chọn server Thuyết minh / Lồng tiếng (không Vietsub) */
   preferThuyetMinhAudio: true,
   audioTabsSelectors: FILM_AUDIO_TAB_SELECTORS,
-  filmStreamWaitMs: 14000,
+  /** URL tập từ API đã ưu tiên Thuyết minh — goto trực tiếp, không click tab audio */
+  skipFilmAudioUiForGoto: true,
+  /** RoPhim: navigate thẳng URL từng tập (API) — ổn định hơn click cùng trang */
+  episodeNavigateByGoto: true,
+  filmStreamWaitMs: 22000,
+  filmRetryStreamWaitMs: 28000,
+  filmGotoSleepMs: 2000,
   serverTabsSelector: null,
   filterTabLabel,
   filterEpisodeHref,

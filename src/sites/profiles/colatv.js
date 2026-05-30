@@ -88,6 +88,8 @@ export const colatvSiteProfile = {
   networkIdleCapMs: 12000,
   scrollPasses: 2,
   skipHtmlFetchFallback: false,
+  /** Listing (oastaug.com) links to match pages on ici-londres.com */
+  allowCrossOriginLinks: true,
   prepareListingPage,
   filterListingMatch,
   resolveListingTitle,

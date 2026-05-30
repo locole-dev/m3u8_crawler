@@ -2,7 +2,6 @@ import fs from 'fs/promises';
 import path from 'path';
 import { FilmExtractor } from './FilmExtractor.js';
 import { resolveFilmConfigs } from '../loadServerLinkConfig.js';
-import { buildFilmCatalogPlaylist } from './playlist.js';
 import { parseLimit } from '../playlist.js';
 import { formatHcmTime, hcmLogPrefix } from '../formatTime.js';
 import {
@@ -11,6 +10,12 @@ import {
   FILM_JSON_PATH,
   FILM_M3U_PATH,
 } from './paths.js';
+import {
+  countStreams,
+  loadFilmCatalog,
+  mergeFilmResult,
+  persistFilmCatalog,
+} from './catalog.js';
 
 const CRAWL_GAP_MS = Number.parseInt(process.env.FILM_CRAWL_GAP_MS, 10) || 1500;
 
@@ -23,8 +28,8 @@ export async function crawlFilmSources(label, cliDefaults = {}) {
 
   await ensureFilmOutputDir();
 
-  const filmEntries = [];
-  const allResults = [];
+  const catalog = await loadFilmCatalog(configs);
+  let persisted = null;
   const extractor = new FilmExtractor({
     timeout: Number.parseInt(process.env.FILM_TIMEOUT_MS, 10) || 120000,
     collectMs: Number.parseInt(process.env.FILM_COLLECT_MS, 10) || 1500,
@@ -39,24 +44,58 @@ export async function crawlFilmSources(label, cliDefaults = {}) {
       if (index > 0) {
         await sleep(CRAWL_GAP_MS);
       }
-      await crawlOneConfig(extractor, cfg, label, filmEntries, allResults);
+      const crawlResult = await crawlOneConfig(extractor, cfg, label);
+      mergeCrawlResult(catalog, crawlResult, cfg, label);
+      persisted = await persistFilmCatalog(catalog, configs);
+      logPersistedCatalog(label, persisted, configs.length);
     }
   } finally {
     releaseRejectionGuard();
     await extractor.close();
   }
 
-  const mergedPlaylist = buildFilmCatalogPlaylist(filmEntries);
-  await fs.writeFile(FILM_M3U_PATH, mergedPlaylist, 'utf-8');
-  await fs.writeFile(FILM_JSON_PATH, JSON.stringify(allResults, null, 2), 'utf-8');
+  if (!persisted) {
+    persisted = await persistFilmCatalog(catalog, configs);
+  }
+
   console.log(
-    `${hcmLogPrefix()} [phim] ${label}: ${filmEntries.length} phim → ${path.basename(FILM_M3U_PATH)} / ${path.basename(FILM_JSON_PATH)}`,
+    `${hcmLogPrefix()} [phim] ${label}: ${persisted.filmCount} phim, ${persisted.streamCount} tập → ${path.basename(FILM_M3U_PATH)} / ${path.basename(FILM_JSON_PATH)}`,
   );
 
-  return { results: allResults, playlist: mergedPlaylist, filmEntries };
+  return persisted;
 }
 
-async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { retry = false } = {}) {
+export async function crawlOneFilmSource(specifier, label = 'Manual (one)') {
+  const configs = await resolveFilmConfigs();
+  const cfg = resolveFilmConfigSpecifier(configs, specifier);
+
+  if (!cfg) {
+    throw new Error(`Không tìm thấy film config: ${specifier}`);
+  }
+
+  await ensureFilmOutputDir();
+
+  const catalog = await loadFilmCatalog(configs);
+  const extractor = new FilmExtractor({
+    timeout: Number.parseInt(process.env.FILM_TIMEOUT_MS, 10) || 120000,
+    collectMs: Number.parseInt(process.env.FILM_COLLECT_MS, 10) || 1500,
+  });
+  const releaseRejectionGuard = attachBrowserClosedRejectionGuard();
+
+  try {
+    await extractor.init();
+    const crawlResult = await crawlOneConfig(extractor, cfg, label);
+    mergeCrawlResult(catalog, crawlResult, cfg, label);
+    const persisted = await persistFilmCatalog(catalog, configs);
+    logPersistedCatalog(label, persisted, configs.length);
+    return { ...persisted, cfg, crawlResult };
+  } finally {
+    releaseRejectionGuard();
+    await extractor.close();
+  }
+}
+
+async function crawlOneConfig(extractor, cfg, label, { retry = false } = {}) {
   const tag = retry ? ' (retry)' : '';
   console.log(`${hcmLogPrefix()} [phim] ${label}${tag}: ${cfg.subCommand} ${cfg.targetUrl} (${cfg.configPath})`);
 
@@ -67,11 +106,10 @@ async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { 
       const result = await extractor.extractFromMatch(cfg.targetUrl, {
         serverTabsSelector: cfg.serverTabsSelector,
       });
-      filmEntries.push({ result, cfg });
-      allResults.push(result);
       console.log(
         `${hcmLogPrefix()} [phim] ${label}: 1 phim, ${result.streams?.length ?? 0} tập`,
       );
+      return { ok: true, entries: [{ result, cfg }], results: [result] };
     } else {
       const limit = parseLimit(cfg.limitArg, 100);
       const list = await extractor.extractAll(cfg.targetUrl, {
@@ -79,25 +117,63 @@ async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { 
         itemSelector: cfg.itemSelector,
         serverTabsSelector: cfg.serverTabsSelector,
       });
-      for (const item of list) {
-        filmEntries.push({ result: item, cfg });
-        allResults.push(item);
-      }
       console.log(
         `${hcmLogPrefix()} [phim] ${label}: ${list.length} phim, ${countStreams(list)} stream(s)`,
       );
+      return {
+        ok: true,
+        entries: list.map((result) => ({ result, cfg })),
+        results: list,
+      };
     }
-    return true;
   } catch (err) {
     console.error(
       `${hcmLogPrefix()} [phim] ${label}: failed ${cfg.targetUrl}: ${err.message}`,
     );
     if (!retry && isBrowserClosedError(err)) {
       await restartFilmBrowser(extractor).catch(() => {});
-      return crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { retry: true });
+      return crawlOneConfig(extractor, cfg, label, { retry: true });
     }
-    return false;
+    return { ok: false, entries: [], results: [], error: err };
   }
+}
+
+function mergeCrawlResult(catalog, crawlResult, cfg, label) {
+  const entries = crawlResult.entries ?? [];
+
+  if (entries.length === 0) {
+    console.warn(`${hcmLogPrefix()} [phim] ${label}: không có kết quả mới, giữ catalog cũ: ${cfg.filmTitle || cfg.targetUrl}`);
+    return [];
+  }
+
+  return entries.map((entry) => {
+    const report = mergeFilmResult(catalog, entry);
+    logMergeReport(label, entry, report);
+    return report;
+  });
+}
+
+function logMergeReport(label, entry, report) {
+  const filmTitle = entry.cfg?.filmTitle || entry.result?.title || entry.result?.matchUrl || entry.cfg?.targetUrl;
+  const prefix = `${hcmLogPrefix()} [phim] ${label}:`;
+
+  if (report.action === 'added' || report.action === 'replaced') {
+    console.log(`${prefix} đã lưu ${filmTitle}: ${report.newCount} tập (${report.action})`);
+    return;
+  }
+
+  if (report.action === 'kept') {
+    console.warn(`${prefix} giữ bản cũ ${filmTitle}: cũ ${report.oldCount} tập, mới ${report.newCount} tập (${report.reason})`);
+    return;
+  }
+
+  console.warn(`${prefix} bỏ qua ${filmTitle}: ${report.reason}`);
+}
+
+function logPersistedCatalog(label, persisted, totalConfigs) {
+  console.log(
+    `${hcmLogPrefix()} [phim] ${label}: catalog ${persisted.filmCount}/${totalConfigs} phim, ${persisted.streamCount} tập`,
+  );
 }
 
 async function ensureFilmBrowser(extractor) {
@@ -167,6 +243,30 @@ export function crawlLockPath() {
   return FILM_CRAWL_LOCK_PATH;
 }
 
-function countStreams(results) {
-  return results.reduce((n, r) => n + (r?.streams?.length ?? 0), 0);
+function resolveFilmConfigSpecifier(configs, specifier) {
+  const raw = String(specifier || '').trim();
+  if (!raw) {
+    return null;
+  }
+
+  const rawLower = raw.toLowerCase();
+  const rawSlug = path.basename(rawLower, '.json');
+  const rawAbs = path.resolve(rawLower);
+
+  return (
+    configs.find((cfg) => cfg.targetUrl === raw) ??
+    configs.find((cfg) => cfg.targetUrl?.toLowerCase() === rawLower) ??
+    configs.find((cfg) => path.resolve(String(cfg.configPath || '').toLowerCase()) === rawAbs) ??
+    configs.find((cfg) => path.basename(String(cfg.configPath || '').toLowerCase(), '.json') === rawSlug) ??
+    configs.find((cfg) => slugFromUrl(cfg.targetUrl) === rawSlug) ??
+    null
+  );
+}
+
+function slugFromUrl(url) {
+  try {
+    return new URL(url).pathname.split('/').pop()?.split('.')[0]?.toLowerCase() ?? '';
+  } catch {
+    return '';
+  }
 }
