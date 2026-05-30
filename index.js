@@ -5,6 +5,7 @@ import { resolveCrawlConfig, resolveFootballConfigs } from './src/loadServerLink
 import { crawlFootballSources } from './src/football/crawlSources.js';
 import { buildIptvPlaylist, parseLimit } from './src/playlist.js';
 import { resolveSiteProfile } from './src/sites/registry.js';
+import { hcmLogPrefix } from './src/formatTime.js';
 import fs from 'fs/promises';
 import cron from 'node-cron';
 import express from 'express';
@@ -166,7 +167,7 @@ async function startServe(args) {
   console.log(`[bong-da] cron: "${cronExp}"`);
   cron.schedule(cronExp, async () => {
     if (jobRunning) {
-      console.warn(`[${new Date().toISOString()}] [bong-da] skip: job still running`);
+      console.warn(`${hcmLogPrefix()} [bong-da] skip: job still running`);
       return;
     }
     jobRunning = true;
@@ -179,7 +180,7 @@ async function startServe(args) {
 
   jobRunning = true;
   crawlFootballSources('Initial')
-    .catch(() => console.error(`[${new Date().toISOString()}] [bong-da] initial crawl failed`))
+    .catch(() => console.error(`${hcmLogPrefix()} [bong-da] initial crawl failed`))
     .finally(() => {
       jobRunning = false;
     });

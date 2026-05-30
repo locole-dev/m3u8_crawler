@@ -4,9 +4,11 @@ import fs from 'fs/promises';
 import express from 'express';
 import cors from 'cors';
 import { FilmExtractor } from './src/film/FilmExtractor.js';
-import { crawlFilmSources, crawlFilmSourcesOnce } from './src/film/crawlSources.js';
+import { crawlFilmSourcesOnce } from './src/film/crawlSources.js';
 import { buildFilmCatalogPlaylist } from './src/film/playlist.js';
 import { resolveFilmConfigs } from './src/loadServerLinkConfig.js';
+import { hcmLogPrefix } from './src/formatTime.js';
+import { FILM_JSON_PATH, FILM_M3U_PATH } from './src/film/paths.js';
 
 async function runOnce(subCommand, targetUrl, outputPrefix) {
   const configs = await resolveFilmConfigs();
@@ -74,7 +76,7 @@ async function startServe(args) {
 
   app.get('/film.m3u', async (req, res) => {
     try {
-      const content = await fs.readFile('film.m3u', 'utf-8');
+      const content = await fs.readFile(FILM_M3U_PATH, 'utf-8');
       res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch {
@@ -84,7 +86,7 @@ async function startServe(args) {
 
   app.get('/api/film/playlist', async (req, res) => {
     try {
-      const content = await fs.readFile('film.m3u', 'utf-8');
+      const content = await fs.readFile(FILM_M3U_PATH, 'utf-8');
       res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
       res.send(content);
     } catch {
@@ -94,7 +96,7 @@ async function startServe(args) {
 
   app.get('/api/film/playlist.json', async (req, res) => {
     try {
-      const content = await fs.readFile('film.json', 'utf-8');
+      const content = await fs.readFile(FILM_JSON_PATH, 'utf-8');
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.send(content);
     } catch {
@@ -115,9 +117,9 @@ async function startServe(args) {
     crawlFilmSourcesOnce('Startup')
       .then((r) => {
         if (r.skipped) return;
-        console.log(`[${new Date().toISOString()}] [phim] Startup crawl xong.`);
+        console.log(`${hcmLogPrefix()} [phim] Startup crawl xong.`);
       })
-      .catch(() => console.error(`[${new Date().toISOString()}] [phim] Startup crawl failed.`))
+      .catch(() => console.error(`${hcmLogPrefix()} [phim] Startup crawl failed.`))
       .finally(() => {
         crawlRunning = false;
       });
@@ -144,8 +146,7 @@ async function main() {
   }
 
   if (cmd === 'crawl') {
-    await crawlFilmSources(force ? 'Manual (force)' : 'Manual');
-    await fs.writeFile('film.crawl.lock', `${new Date().toISOString()}\n`, 'utf-8');
+    await crawlFilmSourcesOnce(force ? 'Manual (force)' : 'Manual', { force });
     return;
   }
 

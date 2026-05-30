@@ -4,16 +4,24 @@ import { FilmExtractor } from './FilmExtractor.js';
 import { resolveFilmConfigs } from '../loadServerLinkConfig.js';
 import { buildFilmCatalogPlaylist } from './playlist.js';
 import { parseLimit } from '../playlist.js';
+import { formatHcmTime, hcmLogPrefix } from '../formatTime.js';
+import {
+  ensureFilmOutputDir,
+  FILM_CRAWL_LOCK_PATH,
+  FILM_JSON_PATH,
+  FILM_M3U_PATH,
+} from './paths.js';
 
-const CRAWL_LOCK = 'film.crawl.lock';
 const CRAWL_GAP_MS = Number.parseInt(process.env.FILM_CRAWL_GAP_MS, 10) || 1500;
 
 export async function crawlFilmSources(label, cliDefaults = {}) {
   const configs = await resolveFilmConfigs(cliDefaults);
   if (configs.length === 0) {
-    console.log(`[${new Date().toISOString()}] [phim] ${label}: no configs in server_link/phim/.`);
+    console.log(`${hcmLogPrefix()} [phim] ${label}: no configs in server_link/phim/.`);
     return { results: [], playlist: '#EXTM3U\n' };
   }
+
+  await ensureFilmOutputDir();
 
   const filmEntries = [];
   const allResults = [];
@@ -39,19 +47,18 @@ export async function crawlFilmSources(label, cliDefaults = {}) {
   }
 
   const mergedPlaylist = buildFilmCatalogPlaylist(filmEntries);
-  await fs.writeFile('film.m3u', mergedPlaylist, 'utf-8');
-  await fs.writeFile('film.json', JSON.stringify(allResults, null, 2), 'utf-8');
+  await fs.writeFile(FILM_M3U_PATH, mergedPlaylist, 'utf-8');
+  await fs.writeFile(FILM_JSON_PATH, JSON.stringify(allResults, null, 2), 'utf-8');
   console.log(
-    `[${new Date().toISOString()}] [phim] ${label}: ${filmEntries.length} phim → film.m3u / film.json`,
+    `${hcmLogPrefix()} [phim] ${label}: ${filmEntries.length} phim → ${path.basename(FILM_M3U_PATH)} / ${path.basename(FILM_JSON_PATH)}`,
   );
 
   return { results: allResults, playlist: mergedPlaylist, filmEntries };
 }
 
 async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { retry = false } = {}) {
-  const ts = new Date().toISOString();
   const tag = retry ? ' (retry)' : '';
-  console.log(`[${ts}] [phim] ${label}${tag}: ${cfg.subCommand} ${cfg.targetUrl} (${cfg.configPath})`);
+  console.log(`${hcmLogPrefix()} [phim] ${label}${tag}: ${cfg.subCommand} ${cfg.targetUrl} (${cfg.configPath})`);
 
   try {
     await ensureFilmBrowser(extractor);
@@ -63,7 +70,7 @@ async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { 
       filmEntries.push({ result, cfg });
       allResults.push(result);
       console.log(
-        `[${new Date().toISOString()}] [phim] ${label}: 1 phim, ${result.streams?.length ?? 0} tập`,
+        `${hcmLogPrefix()} [phim] ${label}: 1 phim, ${result.streams?.length ?? 0} tập`,
       );
     } else {
       const limit = parseLimit(cfg.limitArg, 100);
@@ -77,13 +84,13 @@ async function crawlOneConfig(extractor, cfg, label, filmEntries, allResults, { 
         allResults.push(item);
       }
       console.log(
-        `[${new Date().toISOString()}] [phim] ${label}: ${list.length} phim, ${countStreams(list)} stream(s)`,
+        `${hcmLogPrefix()} [phim] ${label}: ${list.length} phim, ${countStreams(list)} stream(s)`,
       );
     }
     return true;
   } catch (err) {
     console.error(
-      `[${new Date().toISOString()}] [phim] ${label}: failed ${cfg.targetUrl}: ${err.message}`,
+      `${hcmLogPrefix()} [phim] ${label}: failed ${cfg.targetUrl}: ${err.message}`,
     );
     if (!retry && isBrowserClosedError(err)) {
       await restartFilmBrowser(extractor).catch(() => {});
@@ -142,9 +149,9 @@ function sleep(ms) {
 export async function crawlFilmSourcesOnce(label, { force = false } = {}) {
   if (!force) {
     try {
-      await fs.access(CRAWL_LOCK);
-      console.log(`[phim] Đã crawl rồi (${CRAWL_LOCK}). Bỏ qua. Dùng: node film-index.js crawl --force`);
-      const playlist = await fs.readFile('film.m3u', 'utf-8').catch(() => '#EXTM3U\n');
+      await fs.access(FILM_CRAWL_LOCK_PATH);
+      console.log(`[phim] Đã crawl rồi (${FILM_CRAWL_LOCK_PATH}). Bỏ qua. Dùng: node film-index.js crawl --force`);
+      const playlist = await fs.readFile(FILM_M3U_PATH, 'utf-8').catch(() => '#EXTM3U\n');
       return { skipped: true, playlist };
     } catch {
       /* chưa crawl */
@@ -152,12 +159,12 @@ export async function crawlFilmSourcesOnce(label, { force = false } = {}) {
   }
 
   const out = await crawlFilmSources(label);
-  await fs.writeFile(CRAWL_LOCK, `${new Date().toISOString()}\n`, 'utf-8');
+  await fs.writeFile(FILM_CRAWL_LOCK_PATH, `${formatHcmTime()}\n`, 'utf-8');
   return { ...out, skipped: false };
 }
 
 export function crawlLockPath() {
-  return path.resolve(CRAWL_LOCK);
+  return FILM_CRAWL_LOCK_PATH;
 }
 
 function countStreams(results) {

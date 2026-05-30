@@ -54,6 +54,15 @@ export function isEpisodeTabLabel(label) {
   return /^tập\s*0*\d+$/i.test(String(label || '').trim());
 }
 
+export function episodeNumberFromLabel(label) {
+  const m = String(label || '').match(/Tập\s*(\d+)/i);
+  return m ? Number.parseInt(m[1], 10) : null;
+}
+
+export function formatEpisodeLabel(epNum) {
+  return `Tập ${epNum}`;
+}
+
 export function scoreFilmStreamUrl(url) {
   const u = String(url).toLowerCase();
   let score = 2;

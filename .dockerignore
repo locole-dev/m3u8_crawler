@@ -16,6 +16,7 @@ film.crawl.lock
 film-crawl-log.txt
 *-test.m3u
 *-test.json
+tmp-*.mjs
 
 scripts/
 test-results/
