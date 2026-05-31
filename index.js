@@ -161,7 +161,7 @@ async function startServe(args) {
     console.log(`  - /playlist.m3u`);
     console.log(`  - /api/playlist`);
     console.log(`  - /api/playlist.json`);
-    console.log(`  - Phim: chạy riêng → node film-index.js serve (port ${process.env.FILM_PORT || 3001})`);
+    console.log(`  - Phim: node film-index.js serve → port ${process.env.FILM_PORT || 3001} (/film.m3u, /api/playlist)`);
   });
 
   console.log(`[bong-da] cron: "${cronExp}"`);

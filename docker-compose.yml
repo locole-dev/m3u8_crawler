@@ -36,9 +36,8 @@ services:
     ports:
       - "${FILM_PORT:-3001}:3001"
     restart: unless-stopped
-    mem_limit: 768m
-    depends_on:
-      - scraper-football
+    mem_limit: 1024m
+    shm_size: "512mb"
     environment:
       HOST: "0.0.0.0"
       FILM_PORT: "3001"
@@ -46,11 +45,13 @@ services:
       FILM_TIMEOUT_MS: "120000"
       FILM_COLLECT_MS: "1500"
       FILM_MATCH_TIMEOUT_MS: "900000"
+      FILM_CRAWL_GAP_MS: "1500"
+      FILM_SKIP_STARTUP_CRAWL: "${FILM_SKIP_STARTUP_CRAWL:-false}"
       HEADLESS: "true"
       FILM_HEADLESS: "true"
       NODE_OPTIONS: "--unhandled-rejections=warn"
     volumes:
-      - ./server_link/phim:/app/server_link/phim
+      - ./server_link/phim:/app/server_link/phim:ro
       - film_data:/data/film
     command: ["node", "film-index.js", "serve", "3001"]
     healthcheck:
@@ -61,10 +62,10 @@ services:
           "-e",
           "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
         ]
-      interval: 45s
-      timeout: 15s
+      interval: 30s
+      timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 60s
 
 volumes:
   film_data:

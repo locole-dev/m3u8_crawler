@@ -8,6 +8,7 @@
     "start": "node index.js",
     "start:football": "node index.js serve 3000 \"*/30 * * * *\"",
     "start:film": "node film-index.js serve 3001",
+    "deploy": "docker compose up -d --build",
     "crawl:film": "node film-index.js crawl --force",
     "extract": "node index.js",
     "install:browsers": "playwright install chromium"
